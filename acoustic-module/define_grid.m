@@ -60,7 +60,11 @@ PML_min = 15;
 % layer) to have small prime factors:
 Mx = optimize_grid_size(Nx, 2*PML_min, maxPrime);
 My = optimize_grid_size(Ny, 2*PML_min, maxPrime);
-Mz = optimize_grid_size(Nz, 2*PML_min, maxPrime);
+if Nz > 1
+    Mz = optimize_grid_size(Nz, 2*PML_min, maxPrime);
+else
+    Mz = 1;  % 2D slice: single Z plane, no PML expansion needed
+end
 
 % Size of the perfectly matched layer (PML):
 PML.X_SIZE = ceil((Mx-Nx)/2);

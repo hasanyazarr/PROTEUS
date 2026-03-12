@@ -129,6 +129,9 @@ if isempty(PATHS.MicrobubblePath)
         'microbubble-simulator');
 end
 
+% Default subfolder name for RF simulation results (under ResultsPath)
+PATHS.DefaultSaveFolder = 'RESULTS_3DC_3D';
+
 
 %==========================================================================
 % CHECK IF DIRECTORIES EXIST

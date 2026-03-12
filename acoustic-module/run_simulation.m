@@ -27,6 +27,11 @@ input_args = {...
     'DataCast',  run_param.DATA_CAST, ...
     'Smooth',    false};
 
+% DeleteData only supported by 3DC/3DG (C binary); kspaceFirstOrder3D rejects it
+if isfield(run_param,'BINARY_PATH')
+    input_args = [input_args {'DeleteData', false}];  % Keep h5 files for debugging
+end
+
 if isfield(run_param,'DATA_PATH') 
     input_args = [input_args {'DataPath', run_param.DATA_PATH}];
 end

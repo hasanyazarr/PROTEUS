@@ -228,11 +228,13 @@ if numel(gridZ)>1
   else
     gridCOz = gridZ;
   end
-elseif numel(gridZ)==1 && gridZ==1   %If gridX is a single integer (rather than a vector) and is equal to 1
+elseif numel(gridZ)==1 && gridZ==1   %If gridZ is a single integer equal to 1
   gridCOz   = (meshZmin+meshZmax)/2;
-elseif numel(gridZ)==1 && rem(gridZ,1)==0   %If gridZ is a single integer (rather than a vector) then automatically create the list of z coordinates
+elseif numel(gridZ)==1 && gridZ > 1 && rem(gridZ,1)==0   %If gridZ is a positive integer > 1, treat as grid count
   voxwidth  = (meshZmax-meshZmin)/(gridZ+1/2);
   gridCOz   = meshZmin+voxwidth/2 : voxwidth : meshZmax-voxwidth/2;
+else   %Single coordinate value (e.g. 2D slice at z=0): use as the grid point
+  gridCOz   = gridZ;
 end
 
 %Check that the output grid is large enough to cover the mesh:

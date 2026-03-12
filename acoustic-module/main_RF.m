@@ -174,13 +174,16 @@ for pulse_seq_idx = 1 : length(sequence)
 end
 
 %==========================================================================
-% Second & Third iterations
+% Second & Third iterations (frames + MB part)
 
-% Start time and array for holding execution times for performance
-% quantification:
+% Timer for frames+MB part (after initial transmit):
+disp('=== Starting frames + MB part (timer started) ===');
+t_frames_start = tic;
 tstart = tic;
 execution_times = zeros(1,Acquisition.NumberOfFrames);
 saveExecutionTimes = false;
+
+num_frames_to_process = Acquisition.EndFrame - Acquisition.StartFrame + 1;
 
 for frame = Acquisition.StartFrame : Acquisition.EndFrame
     display(['frame ', num2str(frame)])
@@ -252,6 +255,14 @@ for frame = Acquisition.StartFrame : Acquisition.EndFrame
     execution_times(frame) = toc(tstart);
     
 end
+
+% Report time for frames + MB part
+frames_elapsed = toc(t_frames_start);
+disp('=== Frames + MB part complete ===');
+fprintf('  Total time:     %.2f s (%.2f min)\n', frames_elapsed, frames_elapsed / 60);
+fprintf('  Frames:         %d\n', num_frames_to_process);
+fprintf('  Microbubbles:   %d\n', Microbubble.Number);
+fprintf('  Per frame:      %.2f s\n', frames_elapsed / num_frames_to_process);
 
 % Save execution times for performance quantification if requested:
 if saveExecutionTimes == true

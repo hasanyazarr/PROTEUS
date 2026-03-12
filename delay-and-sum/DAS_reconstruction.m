@@ -106,8 +106,9 @@ IMG = reshape(IMG, [length(x) length(z) Nframes]);
 % Demodulation of the signals:
 IMG = abs(IMG);
 
-% Log compression:
+% Log compression (avoid 0/0 when a frame has no signal):
 IMG_max = max(IMG,[],[1,2]); % Maximum value (1-by-1-by-Nframes)
+IMG_max(IMG_max <= 0) = 1;   % avoid division by zero -> NaN
 IMG = 20*log10(IMG./IMG_max);
 
 end

@@ -7,6 +7,7 @@ t = response.t;
 ts = scatter.t;
 ps = scatter.ps;
 
+% Skip figure creation when display is disabled
 if dispFig == false
     return
 end
@@ -16,7 +17,7 @@ fr = linspace(0,1/mean(diff(t)),length(ps));
 TF = abs(fft(ps))*mean(diff(t));
 
 % Plot the bubble radius as a function of time
-figure(2);
+figure('Name', 'Microbubble response');
 subplot(2,2,1);
 plot(t.*1e6,R.*1e6);
 grid on 

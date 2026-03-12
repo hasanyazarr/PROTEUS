@@ -8,6 +8,11 @@ switch SimulationParameters.Solver
         run_param.solver       = 'kspaceFirstOrder3D';
         run_param.DATA_CAST    = 'single'; % run locally and record movie
         run_param.record_movie = true;
+    case 'MATLAB'
+        % Pure MATLAB 3D solver (no C binary); for testing when 3DC fails
+        run_param.solver       = 'kspaceFirstOrder3D';
+        run_param.DATA_CAST    = 'single';
+        run_param.record_movie = false;
     case '3DC'
         run_param.solver       = 'kspaceFirstOrder3DC';
         run_param.DATA_CAST    = 'single';

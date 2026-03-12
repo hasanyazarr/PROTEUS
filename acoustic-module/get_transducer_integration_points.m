@@ -89,11 +89,16 @@ spacing_int_z = Grid.dz/target_density;
 % that the integration points overlap with the grid in the integration
 % direction in case the integration point density is 1, which speeds up
 % integration.
-Z1 = ceil(-H/2/spacing_int_z);
-Z2 = floor(H/2/spacing_int_z);
-
-% Number of integration points per element in the elevation direction:
-N_int_z = length(Z1:Z2);
+if Grid.Nz == 1
+    % 2D slice: collapse elevation to a single integration point at z=0.
+    % This prevents voxelize_media_points from discarding off-grid z-points,
+    % which would cause a dimension mismatch in define_source_transducer.
+    N_int_z = 1;
+else
+    Z1 = ceil(-H/2/spacing_int_z);
+    Z2 = floor(H/2/spacing_int_z);
+    N_int_z = length(Z1:Z2);
+end
 
 % Total number of integration points per element:
 N_int = N_int_y*N_int_z;
@@ -109,7 +114,11 @@ for i = 1:N
     % Coordinates of the integration points in the current element:
     x = 0;
     y = y_min(i) + (1:N_int_y)*spacing_int_y - spacing_int_y/2;
-    z = (Z1:Z2)*spacing_int_z;
+    if Grid.Nz == 1
+        z = 0;  % single elevation point at transducer centre
+    else
+        z = (Z1:Z2)*spacing_int_z;
+    end
     
     [x,y,z] = ndgrid(x,y,z);
     Transducer.integration_points(i,:,:) = [x(:) y(:) z(:)]; 
@@ -117,8 +126,14 @@ for i = 1:N
 end
 
 % Quadrature weight for each integration point:
-Transducer.integration_weights = ...
-    spacing_int_y*spacing_int_z/(Grid.dy*Grid.dz);
+if Grid.Nz == 1
+    % 2D slice: one z-point represents the full element height H
+    Transducer.integration_weights = ...
+        spacing_int_y*H/(Grid.dy*Grid.dz);
+else
+    Transducer.integration_weights = ...
+        spacing_int_y*spacing_int_z/(Grid.dy*Grid.dz);
+end
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
