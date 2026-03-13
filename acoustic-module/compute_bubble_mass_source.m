@@ -41,7 +41,9 @@ M = floor(t_kwave(end)*fs_MB) + 1;
 t_MB    = (0:(M-1)) / fs_MB;
 
 % Resample signal at the sampling rate of the microbubble module:
+t_resamp1 = tic;
 sensed_p = sinc_interpolation(t_kwave, transpose(sensed_p), t_MB);
+fprintf('    [TIMING] sinc_interpolation (input):  %.2f s\n', toc(t_resamp1));
 
 % Filter settings:
 Filter.dt          = 1/fs_MB;
@@ -69,6 +71,7 @@ radii = transpose(radii);
 mass_source = zeros(N_MB,M,class(sensed_p));
 
 % Loop over all MBs to compute response:
+t_ode = tic;
 if useparfor
     
     % Write the sensed pressure and the radii to cell arrays, each cell
@@ -122,15 +125,20 @@ else
 
     end
 end
-   
+fprintf('    [TIMING] ODE batches total:            %.2f s\n', toc(t_ode));
+
 % Filter unsupported frequencies before downsampling:
+t_filt = tic;
 for i = 1:N_MB
     mass_source(i,:) = filterTimeSeries(Filter,Filter,mass_source(i,:),...
-        'ZeroPhase',true,'TransitionWidth',Filter.TW,'PPW',2);  
+        'ZeroPhase',true,'TransitionWidth',Filter.TW,'PPW',2);
 end
+fprintf('    [TIMING] filterTimeSeries (%d MBs):    %.2f s\n', N_MB, toc(t_filt));
 
 % Resample signals at the sampling rate of the acoustic module:
+t_resamp2 = tic;
 mass_source = sinc_interpolation(t_MB, transpose(mass_source), t_kwave);
+fprintf('    [TIMING] sinc_interpolation (output): %.2f s\n', toc(t_resamp2));
 
 disp('=================================================================')
 disp('EXITING MICROBUBBLE MODULE')
@@ -172,7 +180,11 @@ shell = arrayfun(@(x) ...
 bubble = arrayfun(@(x) struct('R0',x), radii);
 
 % Compute the bubble response:
-response = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
+if gpuDeviceCount > 0
+    response = calcBubbleResponse_GPU(liquid, gas, shell, bubble, pulse);
+else
+    response = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
+end
 
 % Compute mass source for the current batch:
 R    = transpose([response.R]);

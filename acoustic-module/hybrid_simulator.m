@@ -32,14 +32,16 @@ for iter = 1:N_interactions
         Medium.SpeedOfSound; % [s]
 
     % Update number of time points:
-    Grid.Nt = floor(t_end_2 / Grid.dt) + 1; 
+    Grid.Nt = floor(t_end_2 / Grid.dt) + 1;
 
-    % Compute microbubble mass sources:       
+    % Compute microbubble mass sources:
+    t_mb = tic;
     mass_source = compute_bubble_mass_source(...
         sensed_p,  MB.radii, Grid, Medium, Microbubble, Transmit);
+    fprintf('  [TIMING] compute_bubble_mass_source (iter %d): %.2f s\n', iter, toc(t_mb));
 
     source = [];
-    sensor = [];   
+    sensor = [];
 
     source.mass_source  = mass_source;
     source.points       = MB.points;
@@ -49,8 +51,10 @@ for iter = 1:N_interactions
     run_param.gridded = false;
 
     % Run the linear simulation:
+    t_prop = tic;
     sensor_data = run_simulation_homogeneous(...
         run_param, Grid, medium, source, sensor);
+    fprintf('  [TIMING] run_simulation_homogeneous (iter %d): %.2f s\n', iter, toc(t_prop));
 
     % Transfer data to CPU if on GPU:
     sensor_data.p = gather(sensor_data.p);
@@ -67,9 +71,11 @@ disp('Simulating receive data.')
 % Update number of time points:
 Grid.Nt = floor(t_end_3 / Grid.dt) + 1;
 
-% Compute microbubble mass sources:       
+% Compute microbubble mass sources:
+t_mb = tic;
 mass_source = compute_bubble_mass_source(...
     sensed_p,  MB.radii, Grid, Medium, Microbubble, Transmit);
+fprintf('  [TIMING] compute_bubble_mass_source (receive): %.2f s\n', toc(t_mb));
 
 [i,j,k] = ind2sub([Grid.Nx,Grid.Ny,Grid.Nz],...
     sensor_mask_idx_trans);
@@ -84,8 +90,10 @@ source.points       = MB.points;
 run_param.gridded = true;
 
 % Run the linear simulation:
+t_prop = tic;
 sensor_data = run_simulation_homogeneous(...
     run_param, Grid, medium, source, sensor);
+fprintf('  [TIMING] run_simulation_homogeneous (receive): %.2f s\n', toc(t_prop));
 
 % Remove the microbubble module from the path
 rmpath(run_param.MicrobubblePath)

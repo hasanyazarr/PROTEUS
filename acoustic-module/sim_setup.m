@@ -50,7 +50,7 @@ run_param.MicrobubblePath = PATHS.MicrobubblePath;
 run_param.N_interactions = SimulationParameters.NumberOfInteractions;
 
 % Microbubbles parallel processing properties:
-run_param.MicrobubblesBatchSize = 15;
+run_param.MicrobubblesBatchSize = 100;
 run_param.MicrobubblesUseParfor = 'auto';
 
 end

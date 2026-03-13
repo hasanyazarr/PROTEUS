@@ -168,9 +168,10 @@ for pulse_seq_idx = 1 : length(sequence)
     end
 
     disp('Simulating transmit wave.')
-    
+    t_tx = tic;
     sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
         medium, source_transducer{pulse_seq_idx}, sensor);
+    fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', pulse_seq_idx, toc(t_tx));
 end
 
 %==========================================================================
@@ -238,8 +239,10 @@ for frame = Acquisition.StartFrame : Acquisition.EndFrame
         end
         
         % Compute element RF data recorded by transducer:
+        t_rf = tic;
         [RF{pulse_seq_idx}, run_param] = compute_RF_data(...
             Transducer,sensor_data,sensor_weights,Grid,run_param);
+        fprintf('[TIMING] compute_RF_data: %.2f s\n', toc(t_rf));
         
         Frame{pulse_seq_idx} = MB;
         
