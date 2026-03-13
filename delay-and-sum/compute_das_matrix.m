@@ -1,7 +1,7 @@
 function M_DAS = compute_das_matrix(t, x, y, x_el, c, Fs, focus)
 %COMPUTE_DAS_MATRIX Compute delay-and-sum reconstruction matrix. Construct
 %a sparse matrix that performs delay-and-sum reconstruction on element RF
-%data. The matrix is M-by-N, where M is the total number of pixels (Nx*Ny) 
+%data. The matrix is M-by-N, where M is the total number of pixels (Nx*Ny)
 %and N is the total number of elements in the RF data (Nt*Nelem).
 %
 % INPUT ARGUMENTS:
@@ -14,14 +14,14 @@ function M_DAS = compute_das_matrix(t, x, y, x_el, c, Fs, focus)
 % focus:  lateral focus of the transmit beam
 %
 % Partially based on:
-% Vincent Perrot, Maxime Polichetti, François Varray, Damien Garcia, So you
+% Vincent Perrot, Maxime Polichetti, Franï¿½ois Varray, Damien Garcia, So you
 % think you can DAS? A viewpoint on delay-and-sum beamforming, Ultrasonics,
 % Volume 111, 2021, https://doi.org/10.1016/j.ultras.2020.106309.
 % (https://www.sciencedirect.com/science/article/pii/S0041624X20302444)
 %
 % Nathan Blanken, University of Twente, 2023
 
-alpha_th = pi/3; % Threshold angle for apodization
+% alpha_th = pi/3; % Threshold angle for apodization
 
 Nx      = length(x);     % Number of pixels in x
 Ny      = length(y);     % Number of pixels in y
@@ -50,14 +50,30 @@ end
 % Compute the indices (i,j,k) of an Npixel-by-Nt-by-Nelem sparse matrix
 % with values v:
 i = repmat((1:Npixels)',1,Nelem); % Pixel index
-j = round((t_del - t(1))*Fs) + 1; % Time index
+j = round((t_del - t(1))*Fs) + 1; % Time sample nearest delayed arrival
 k = repmat(1:Nelem,Npixels,1);    % Element index
-v = ones(Npixels,Nelem);          % Element apodization
 
-% Angle (f-number) dependent apodization (discard elements with a greater 
+% v = ones(Npixels,Nelem);          % Element apodization
+% Angle (f-number) dependent apodization (discard elements with a greater
 % angle to the pixel than the threshold angle):
-alpha = atan(abs(x_el-X)./Y);
-v(alpha > alpha_th) = 0;
+% alpha = atan(abs(x_el-X)./Y);
+% v(alpha > alpha_th) = 0;
+
+% Dynamic f-number apodization:
+f_number = 0.8;
+
+% Dynamic receive aperture diameter at each depth (D = z / f#).
+D_max = Y / (2 * f_number);
+
+% Normalized lateral distance from each element to each pixel.
+% |u| <= 1 lies inside the active aperture.
+u = (X - x_el) ./ D_max;
+
+v = zeros(Npixels, Nelem);
+valid_idx = abs(u) <= 1;
+% Raised-cosine taper inside the aperture to suppress sidelobes versus
+% hard element cutoffs.
+v(valid_idx) = 0.5 + 0.5 * cos(pi * u(valid_idx));
 
 % Reshape into column arrays:
 i = i(:);
