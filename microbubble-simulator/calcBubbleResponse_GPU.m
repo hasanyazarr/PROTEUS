@@ -5,6 +5,11 @@ function [response, eqparam] = calcBubbleResponse_GPU(liquid, gas, ...
 % and single-precision arithmetic for maximum throughput.
 % Drop-in replacement for calcBubbleResponse.m
 %
+% Optimizations:
+%   - arrayfun kernel fusion (1 GPU kernel per RHS eval instead of ~20)
+%   - single precision (2x bandwidth, 2x compute on A100)
+%   - strided integration (fewer loop iterations, interpolate output)
+%
 % Nathan Blanken, University of Twente, 2023 (original CPU version)
 % GPU adaptation, 2026
 
@@ -32,6 +37,7 @@ tq = pulse.tq;
 N_out = length(tq);
 dt_dim = single(tq(2) - tq(1));
 dt = dt_dim / T;
+fs_MB = single(1) / dt_dim;
 
 %% Pressure on GPU as single [N_MB x N_out]
 P_gpu = gpuArray(single(pulse.p));
@@ -62,11 +68,36 @@ end
 C1_pre = P0 * T^2 / rho ./ R0.^2;
 omega_nd = sqrt(single(3) * max(gather(kap .* C1_pre)));
 dt_crit  = single(2.0) / omega_nd;
-n_sub    = max(1, ceil(dt / dt_crit));
-h        = dt / single(n_sub);
 
-fprintf('    [GPU-RK4] N_MB=%d, N_out=%d, n_sub=%d, dt=%.4g, h=%.4g\n', ...
-    N_MB, N_out, n_sub, dt, h);
+%% Integration stride: reduce loop iterations by taking larger steps
+% The pressure signal is band-limited by the transmit frequency.
+% At 250 MHz sampling with ~3 MHz center freq, we have ~83 samples/period.
+% A stride of 4 spans ~5% of a period — safe for linear interpolation.
+f_center = single(pulse.f);
+max_harmonic = single(3);   % capture up to 3rd harmonic
+f_max = f_center * max_harmonic;
+% Ensure at least 4 samples per period at highest harmonic after striding
+stride = max(1, floor(fs_MB / (single(4) * f_max)));
+% Also limit by stability: strided step must not exceed dt_crit (with 2x safety margin)
+stride = min(stride, max(1, floor(single(0.5) * dt_crit / dt)));
+% Cap at reasonable maximum
+stride = min(stride, 4);
+
+dt_s = dt * single(stride);   % strided nondimensional step
+
+% Sub-steps within each strided step for stability
+n_sub = max(1, ceil(dt_s / dt_crit));
+h     = dt_s / single(n_sub);
+
+%% Coarse output grid indices
+idx_coarse = int32(1:stride:N_out);
+if idx_coarse(end) ~= int32(N_out)
+    idx_coarse(end+1) = int32(N_out);
+end
+N_coarse = length(idx_coarse);
+
+fprintf('    [GPU-RK4] N_MB=%d, N_out=%d, stride=%d, N_coarse=%d, n_sub=%d, h=%.4g\n', ...
+    N_MB, N_out, stride, N_coarse, n_sub, h);
 
 %% Precompute RP equation constants as single [1 x N_MB]
 C1 = C1_pre;
@@ -86,14 +117,17 @@ two = single(2);
 x  = gpuArray(zeros(1, N_MB, 'single'));
 xd = gpuArray(zeros(1, N_MB, 'single'));
 
-%% Preallocate output as single [N_out x N_MB]
-X_out  = gpuArray(zeros(N_out, N_MB, 'single'));
-Xd_out = gpuArray(zeros(N_out, N_MB, 'single'));
+%% Preallocate coarse output as single [N_coarse x N_MB]
+X_coarse  = gpuArray(zeros(N_coarse, N_MB, 'single'));
+Xd_coarse = gpuArray(zeros(N_coarse, N_MB, 'single'));
 
-%% RK4 integration
-for n = 1:(N_out-1)
-    Pn  = P_gpu(:, n)';      % [1 x N_MB]
-    Pn1 = P_gpu(:, n+1)';
+%% RK4 integration on coarse grid
+for n = 1:(N_coarse-1)
+    i_s = idx_coarse(n);       % start index in fine grid
+    i_e = idx_coarse(n+1);     % end index in fine grid
+
+    Pn  = P_gpu(:, i_s)';     % [1 x N_MB]
+    Pn1 = P_gpu(:, i_e)';
     dP  = Pn1 - Pn;
 
     for s = 0:(n_sub-1)
@@ -114,8 +148,21 @@ for n = 1:(N_out-1)
         xd = xd + h6 * (k1v + two*k2v + two*k3v + k4v);
     end
 
-    X_out(n+1,:)  = x;
-    Xd_out(n+1,:) = xd;
+    X_coarse(n+1,:)  = x;
+    Xd_coarse(n+1,:) = xd;
+end
+
+%% Interpolate coarse results back to fine grid on GPU
+t_coarse = gpuArray(single(tq(idx_coarse)));
+t_fine   = gpuArray(single(tq));
+
+if stride > 1
+    % Spline interpolation on GPU for smooth output
+    X_out  = interp1(t_coarse, X_coarse,  t_fine, 'spline');
+    Xd_out = interp1(t_coarse, Xd_coarse, t_fine, 'spline');
+else
+    X_out  = X_coarse;
+    Xd_out = Xd_coarse;
 end
 
 %% Gather and build response struct (convert back to double for compatibility)
@@ -176,7 +223,7 @@ function [dx, dv] = rp_marmottant(xi, xdi, Pi, ...
     sig_raw = chi * (Ri * Ri / (Rb * Rb) - 1);
     sig = min(max(sig_raw, single(0)), sigl);
 
-    opx  = 1 + xi;
+    opx  = max(1 + xi, single(1e-6));
     iopx = 1 / opx;
     dv = iopx * ( ...
         -1.5 * xdi * xdi ...
@@ -195,7 +242,7 @@ end
 function [dx, dv] = rp_core(xi, xdi, Pi, sig, ...
         kapi, c1, c2, c3, c4, c5, c6, invP0)
     % Rayleigh-Plesset RHS with pre-computed surface tension
-    opx  = 1 + xi;
+    opx  = max(1 + xi, single(1e-6));
     iopx = 1 / opx;
     dv = iopx * ( ...
         -1.5 * xdi * xdi ...
