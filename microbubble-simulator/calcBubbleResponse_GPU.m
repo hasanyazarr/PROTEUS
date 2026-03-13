@@ -173,9 +173,8 @@ function [dx, dv] = rp_marmottant(xi, xdi, Pi, ...
         chi, Rb, sigl)
     % Fused Marmottant surface tension + Rayleigh-Plesset RHS
     Ri = R0i * (1 + xi);
-    sig = chi * (Ri * Ri / (Rb * Rb) - 1);
-    if sig < 0;    sig = 0;    end
-    if sig > sigl; sig = sigl; end
+    sig_raw = chi * (Ri * Ri / (Rb * Rb) - 1);
+    sig = min(max(sig_raw, single(0)), sigl);
 
     opx  = 1 + xi;
     iopx = 1 / opx;
