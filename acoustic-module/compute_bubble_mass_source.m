@@ -17,8 +17,12 @@ disp('=================================================================')
 fs_MB = Microbubble.SamplingRate;
 
 % Divide the microbubbles into batches (only a limited number can be
-% processed in parallel)
-batchSize = Microbubble.BatchSize;
+% processed in parallel). On GPU, larger batches reduce overhead.
+if gpuDeviceCount > 0
+    batchSize = 100;
+else
+    batchSize = Microbubble.BatchSize;
+end
 Nbatch = ceil(N_MB/batchSize); % Total number of batches
 
 % Decide whether to use parfor loop or not:
@@ -172,7 +176,11 @@ shell = arrayfun(@(x) ...
 bubble = arrayfun(@(x) struct('R0',x), radii);
 
 % Compute the bubble response:
-response = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
+if gpuDeviceCount > 0
+    response = calcBubbleResponse_GPU(liquid, gas, shell, bubble, pulse);
+else
+    response = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
+end
 
 % Compute mass source for the current batch:
 R    = transpose([response.R]);
