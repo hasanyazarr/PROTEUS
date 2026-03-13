@@ -128,12 +128,26 @@ end
 fprintf('    [TIMING] ODE batches total:            %.2f s\n', toc(t_ode));
 
 % Filter unsupported frequencies before downsampling:
+% Batch FFT-domain low-pass filter (replaces per-bubble filterTimeSeries loop)
 t_filt = tic;
-for i = 1:N_MB
-    mass_source(i,:) = filterTimeSeries(Filter,Filter,mass_source(i,:),...
-        'ZeroPhase',true,'TransitionWidth',Filter.TW,'PPW',2);
-end
-fprintf('    [TIMING] filterTimeSeries (%d MBs):    %.2f s\n', N_MB, toc(t_filt));
+f_max_filter = Filter.k_max * Filter.sound_speed / (2 * pi);
+filter_cutoff_f = f_max_filter;  % PPW=2 → cutoff = f_max
+tw_hz = Filter.TW * fs_MB;      % transition width in Hz
+
+% Build frequency axis for the batch
+N_filt = size(mass_source, 2);
+f_hz = (0:N_filt-1) * (fs_MB / N_filt);
+f_hz(ceil(N_filt/2+1):end) = f_hz(ceil(N_filt/2+1):end) - fs_MB;
+
+% Zero-phase low-pass: smooth rolloff matching Kaiser window behavior
+f_norm = max(0, (abs(f_hz) - filter_cutoff_f) / tw_hz);
+H = 0.5 * (1 + cos(pi * min(f_norm, 1)));
+H(f_norm > 1) = 0;
+
+% Apply to all signals at once via FFT (zero-phase = magnitude-only in freq domain)
+MS_fft = fft(mass_source, [], 2);
+mass_source = real(ifft(MS_fft .* H, [], 2));
+fprintf('    [TIMING] filterTimeSeries_batch (%d MBs): %.2f s\n', N_MB, toc(t_filt));
 
 % Resample signals at the sampling rate of the acoustic module:
 t_resamp2 = tic;
