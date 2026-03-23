@@ -1,11 +1,17 @@
-function visualize_all(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, OUT_FOLDER)
-% visualize_all  Save sample frames from 3 visualization modes:
-%   1) B-mode (grayscale)
-%   2) Microbubble-only (SVD filtered, hot colormap)
-%   3) B-mode + Ground Truth overlay
+function visualize_all(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, OUT_FOLDER, VIDEO_FPS)
+% visualize_all  Save sample frames + video:
+%   1) B-mode + Ground Truth overlay (bmode_gt/)
+%   2) Clean B-mode without GT/axes (bmode_clean/)
+%   3) SVD-filtered B-mode video, all frames (mb_video.mp4)
+%   4) Sample grid
 %
 % Usage:
 %   visualize_all(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, OUT_FOLDER)
+%   visualize_all(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, OUT_FOLDER, 60)
+
+if nargin < 5 || isempty(VIDEO_FPS)
+    VIDEO_FPS = 60;
+end
 
 if ~exist(OUT_FOLDER, 'dir'), mkdir(OUT_FOLDER); end
 
@@ -79,42 +85,8 @@ sample_idx = unique([1, round(Nframes/2), Nframes]);
 fprintf('Sample frames: %s\n', mat2str(sample_idx));
 
 %==========================================================================
-% 1) STANDARD B-MODE
+% SVD FILTERING (used by both bmode_gt and bmode_clean)
 %==========================================================================
-fprintf('\n=== 1/3: Standard B-mode ===\n');
-bmode_dir = fullfile(OUT_FOLDER, 'bmode');
-if ~exist(bmode_dir, 'dir'), mkdir(bmode_dir); end
-
-RF_tgc = RF .* reshape(single(TGC), [1, Nt, 1]);
-RF_das = permute(RF_tgc, [2 1 3]);
-RF_das = hilbert(RF_das);
-RF_das = reshape(double(RF_das), [Nt*Nelem, Nframes]);
-IMG = abs(full(M_DAS * RF_das));
-IMG = reshape(IMG, [length(x_lat), length(z_ax), Nframes]);
-IMG_max = max(IMG(:));
-if IMG_max <= 0, IMG_max = 1; end
-IMG_db = 20*log10(IMG / IMG_max);
-IMG_disp = permute(IMG_db, [2 1 3]);
-
-dynRange = 60;
-for k = sample_idx
-    fig = figure('Visible','off');
-    imagesc(x_lat*1e3, z_ax*1e3, max(IMG_disp(:,:,k), -dynRange), [-dynRange 0]);
-    colormap(gray); axis image; colorbar;
-    xlabel('Lateral (mm)'); ylabel('Depth (mm)');
-    title(sprintf('B-mode - Frame %d', k));
-    exportgraphics(fig, fullfile(bmode_dir, sprintf('bmode_frame_%02d.png', k)), 'Resolution', 150);
-    close(fig);
-    fprintf('  Saved bmode frame %d\n', k);
-end
-
-%==========================================================================
-% 2) MICROBUBBLE-ONLY (SVD filtered)
-%==========================================================================
-fprintf('\n=== 2/3: Microbubble-only (SVD filtered) ===\n');
-mb_dir = fullfile(OUT_FOLDER, 'microbubble');
-if ~exist(mb_dir, 'dir'), mkdir(mb_dir); end
-
 SVD_CUTOFF = 2;
 RF_cas = double(reshape(RF, [Nelem*Nt, Nframes]));
 [U, S, V] = svd(RF_cas, 'econ');
@@ -135,22 +107,10 @@ if IMG2_max <= 0, IMG2_max = 1; end
 IMG2_db = 20*log10(IMG2 / IMG2_max);
 IMG2_disp = permute(IMG2_db, [2 1 3]);
 
-dynRange_mb = 30;
-for k = sample_idx
-    fig = figure('Visible','off');
-    imagesc(x_lat*1e3, z_ax*1e3, max(IMG2_disp(:,:,k), -dynRange_mb), [-dynRange_mb 0]);
-    colormap(hot); axis image; colorbar;
-    xlabel('Lateral (mm)'); ylabel('Depth (mm)');
-    title(sprintf('Microbubbles (SVD cutoff=%d) - Frame %d', SVD_CUTOFF, k));
-    exportgraphics(fig, fullfile(mb_dir, sprintf('mb_frame_%02d.png', k)), 'Resolution', 150);
-    close(fig);
-    fprintf('  Saved microbubble frame %d\n', k);
-end
-
 %==========================================================================
-% 3) B-MODE + GROUND TRUTH OVERLAY
+% 1) B-MODE + GROUND TRUTH OVERLAY
 %==========================================================================
-fprintf('\n=== 3/3: B-mode + Ground Truth overlay ===\n');
+fprintf('\n=== 1/3: B-mode + Ground Truth overlay ===\n');
 gt_dir = fullfile(OUT_FOLDER, 'bmode_gt');
 if ~exist(gt_dir, 'dir'), mkdir(gt_dir); end
 
@@ -192,6 +152,74 @@ for k = sample_idx
         'BackgroundColor','k', 'Resolution', 150);
     close(fig);
     fprintf('  Saved bmode+GT frame %d\n', k);
+end
+
+%==========================================================================
+% 2) CLEAN B-MODE (no GT, no axes, no labels)
+%==========================================================================
+fprintf('\n=== 2/3: Clean B-mode (no GT, no axes) ===\n');
+clean_dir = fullfile(OUT_FOLDER, 'bmode_clean');
+if ~exist(clean_dir, 'dir'), mkdir(clean_dir); end
+
+for k = sample_idx
+    fig = figure('Visible','off', 'Color','k', 'InvertHardcopy','off');
+    ax = axes(fig, 'Position', [0 0 1 1]);
+    imagesc(ax, max(IMG2_disp(:,:,k), -dynRange_gt), [-dynRange_gt 0]);
+    colormap(ax, gray); axis(ax, 'image'); axis(ax, 'off');
+    exportgraphics(fig, fullfile(clean_dir, sprintf('bmode_clean_frame_%02d.png', k)), ...
+        'BackgroundColor','k', 'Resolution', 150);
+    close(fig);
+    fprintf('  Saved clean bmode frame %d\n', k);
+end
+
+%==========================================================================
+% 3) SVD-FILTERED B-MODE VIDEO (all frames, with axes)
+%==========================================================================
+fprintf('\n=== 3/3: B-mode video (%d fps, %d frames) ===\n', VIDEO_FPS, Nframes);
+video_path_mp4 = fullfile(OUT_FOLDER, 'mb_video.mp4');
+video_path_avi = fullfile(OUT_FOLDER, 'mb_video.avi');
+
+% Try MPEG-4 first, fallback to Motion JPEG AVI
+use_mp4 = true;
+try
+    vw = VideoWriter(video_path_mp4, 'MPEG-4');
+    vw.FrameRate = VIDEO_FPS;
+    vw.Quality = 95;
+    open(vw);
+catch
+    fprintf('  MPEG-4 not available, falling back to Motion JPEG AVI...\n');
+    use_mp4 = false;
+    vw = VideoWriter(video_path_avi, 'Motion JPEG AVI');
+    vw.FrameRate = VIDEO_FPS;
+    vw.Quality = 95;
+    open(vw);
+end
+
+fig_v = figure('Visible','off', 'Color','k', 'InvertHardcopy','off', ...
+    'Position', [100 100 800 1200]);
+ax_v = axes(fig_v, 'Color','k');
+
+for k = 1:Nframes
+    imagesc(ax_v, x_lat*1e3, z_ax*1e3, max(IMG2_disp(:,:,k), -dynRange_gt), [-dynRange_gt 0]);
+    colormap(ax_v, gray); axis(ax_v, 'image');
+    xlabel(ax_v, 'Width [mm]', 'Color','w');
+    ylabel(ax_v, 'Depth [mm]', 'Color','w');
+    title(ax_v, sprintf('Frame %d/%d  (FR=%dHz)', k, Nframes, round(frameRate)), 'Color','w');
+    ax_v.XColor = 'w'; ax_v.YColor = 'w';
+    drawnow;
+    frame_img = getframe(fig_v);
+    writeVideo(vw, frame_img.cdata);
+    if mod(k, 100) == 0 || k == Nframes
+        fprintf('  Video: %d/%d frames written\n', k, Nframes);
+    end
+end
+close(vw);
+close(fig_v);
+
+if use_mp4
+    fprintf('  Saved video: %s\n', video_path_mp4);
+else
+    fprintf('  Saved video: %s\n', video_path_avi);
 end
 
 %==========================================================================
