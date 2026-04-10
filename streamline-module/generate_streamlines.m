@@ -60,8 +60,11 @@ inlet = inlet.inlet;
 load(GeometryPropertiesFilename,'options');
 options = odeset(options,'Events',@(t,y)exitVesselFcn(t,y,Grid));
 
+% Velocity scaling factor (increase to speed up MB flow):
+VELOCITY_SCALE = 5;
+
 % Function handle to the ODE:
-odefun = @(t,y) transpose(...
+odefun = @(t,y) VELOCITY_SCALE * transpose(...
     get_velocity(transpose(y), Grid, vtuStruct.velocities));
 
 
@@ -275,8 +278,8 @@ while max(t)<max(acquisitionTimes)
     %------------------------------------------------------------------
     % GET A NEW BUBBLE
     %------------------------------------------------------------------
-    % Position a new bubble at the inlet:
-    startPosition = draw_start_position(1, inlet);
+    % Position a new bubble randomly in the vessel volume:
+    startPosition = draw_start_position(1, vtuStruct);
 
     % Update time array (remaining time):
     tspan = acquisitionTimes(find(acquisitionTimes>t(end),1):end);
