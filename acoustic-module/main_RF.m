@@ -161,34 +161,20 @@ for pulse_seq_idx = 1 : length(sequence)
         mask_idx_trans);
 end
 
-% Cache the recorded transmit pressure across batches. The sensor mask now
-% covers the union of all frames (see define_sensor_MB_all), so this cache is
-% reusable for any StartFrame..EndFrame range within the same NumberOfFrames.
-transmit_cache = [savedir filesep 'transmit.mat'];
-
-if Acquisition.Continue && exist(transmit_cache, 'file')
-    disp('Loading cached transmit pulse data ...')
-    loaded = load(transmit_cache, 'sensor_data_1iter');
-    sensor_data_1iter = loaded.sensor_data_1iter;
-else
-    for pulse_seq_idx = 1 : length(sequence)
-        % Simulation time and memory estimation:
-        if pulse_seq_idx == 1 && estimate == true
-            beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
-            estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
-                beta_coeff_file);
-        end
-
-        disp('Simulating transmit wave.')
-        t_tx = tic;
-        sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
-            medium, source_transducer{pulse_seq_idx}, sensor);
-        fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', ...
-            pulse_seq_idx, toc(t_tx));
+for pulse_seq_idx = 1 : length(sequence)
+    % Simulation time and memory estimation:
+    if pulse_seq_idx == 1 && estimate == true
+        beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
+        estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
+            beta_coeff_file);
     end
 
-    disp('Caching transmit pulse data ...')
-    save(transmit_cache, 'sensor_data_1iter', '-v7.3')
+    disp('Simulating transmit wave.')
+    t_tx = tic;
+    sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
+        medium, source_transducer{pulse_seq_idx}, sensor);
+    fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', ...
+        pulse_seq_idx, toc(t_tx));
 end
 
 %==========================================================================
