@@ -12,9 +12,15 @@ function [sensor, MB_idx_all, max_mb] = define_sensor_MB_all(...
 %
 % Nathan Blanken, Alina Kuliesh, Guillaume Lajoinie, 2023
 
-frame_start = Acquisition.StartFrame;     % First frame to include
-frame_end   = Acquisition.EndFrame;       % Last frame to include
+% Build the sensor mask over the UNION of bubble positions across all
+% frames (1..NumberOfFrames), not just the current batch's StartFrame..EndFrame.
+% The transmit pulse simulation records pressure at every grid point in this
+% mask; if a later batch queries a position that the mask did not cover, the
+% recorded pressure would be missing. Looping over all frames here makes the
+% mask (and the cached transmit recording) reusable across batches.
 Nframes     = Acquisition.NumberOfFrames; % Total number of ground truth frames
+frame_start = 1;
+frame_end   = Nframes;
 
 sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz);
 max_mb = 1;

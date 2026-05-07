@@ -150,28 +150,45 @@ end
 source_transducer = cell(1,length(sequence));
 sensor_data_1iter = cell(1,length(sequence));
 
+% define_source_transducer is fast; always recompute. Only the run_simulation
+% call below (the actual transmit pulse propagation) is expensive enough to
+% cache.
 for pulse_seq_idx = 1 : length(sequence)
-
     Transmit.SeqPulse = sequence{pulse_seq_idx};
-
-    % define the transducer source
-    disp('Creating k-Wave source object for transducer.')   
+    disp('Creating k-Wave source object for transducer.')
     source_transducer{pulse_seq_idx} = define_source_transducer(...
         Transducer, Transmit, Medium, Grid, transpose(sensor_weights), ...
         mask_idx_trans);
+end
 
-    % Simulation time and memory estimation:
-    if pulse_seq_idx == 1 && estimate == true
-        beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
-        estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
-            beta_coeff_file);
+% Cache the recorded transmit pressure across batches. The sensor mask now
+% covers the union of all frames (see define_sensor_MB_all), so this cache is
+% reusable for any StartFrame..EndFrame range within the same NumberOfFrames.
+transmit_cache = [savedir filesep 'transmit.mat'];
+
+if Acquisition.Continue && exist(transmit_cache, 'file')
+    disp('Loading cached transmit pulse data ...')
+    loaded = load(transmit_cache, 'sensor_data_1iter');
+    sensor_data_1iter = loaded.sensor_data_1iter;
+else
+    for pulse_seq_idx = 1 : length(sequence)
+        % Simulation time and memory estimation:
+        if pulse_seq_idx == 1 && estimate == true
+            beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
+            estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
+                beta_coeff_file);
+        end
+
+        disp('Simulating transmit wave.')
+        t_tx = tic;
+        sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
+            medium, source_transducer{pulse_seq_idx}, sensor);
+        fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', ...
+            pulse_seq_idx, toc(t_tx));
     end
 
-    disp('Simulating transmit wave.')
-    t_tx = tic;
-    sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
-        medium, source_transducer{pulse_seq_idx}, sensor);
-    fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', pulse_seq_idx, toc(t_tx));
+    disp('Caching transmit pulse data ...')
+    save(transmit_cache, 'sensor_data_1iter', '-v7.3')
 end
 
 %==========================================================================
