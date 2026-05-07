@@ -41,7 +41,7 @@ fprintf('Microbubble visualizations will be saved to: %s\n', VIS_FOLDER);
 % SVD clutter filter: remove singular values 1..SVD_CUTOFF (tissue clutter)
 SVD_CUTOFF = 20;   % tune this: higher = more clutter removed (try 5-30)
 
-dynamicRange = 30; % dB dynamic range for display
+dynamicRange = 50; % dB dynamic range for display (was 30; widened so dim small bubbles are visible)
 
 if ~exist(RESULTS_FOLDER, 'dir')
     error('Results folder not found: %s', RESULTS_FOLDER);

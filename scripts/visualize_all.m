@@ -115,7 +115,9 @@ gt_dir = fullfile(OUT_FOLDER, 'bmode_gt');
 if ~exist(gt_dir, 'dir'), mkdir(gt_dir); end
 
 % Use SVD-filtered contrast image for GT overlay (same as vis_bmode_groundtruth)
-dynRange_gt = 40;
+% 60 dB shows small (dim) bubbles in the polydisperse SonoVue distribution;
+% drop back toward 40 dB if the background looks too noisy.
+dynRange_gt = 60;
 
 NFrames_total = Acquisition.NumberOfFrames;
 npad_gt = length(num2str(NFrames_total));

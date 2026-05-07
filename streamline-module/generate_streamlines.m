@@ -63,7 +63,20 @@ options = odeset(options,'Events',@(t,y)exitVesselFcn(t,y,Grid));
 % Velocity scaling factor (increase to speed up MB flow):
 VELOCITY_SCALE = 5;
 
-% Function handle to the ODE:
+% --- Vessel tiling: replicate the canonical vessel across the imaging FOV
+% with a random per-streamline offset (and optional rotation about the
+% elevation axis) so MBs cover the whole image plane and flow in different
+% directions. Set ENABLE_TILING=false to restore single-vessel behaviour.
+TileCfg.Enabled              = true;
+TileCfg.RandomizeRotation    = true;          % rotate flow direction in image plane
+TileCfg.DepthRange           = [-0.025, 0.002];  % m, image-X (depth) offset range
+TileCfg.WidthRange           = [-0.015, 0.015];  % m, image-Y (lateral) offset range
+TileCfg.ElevRange            = [-0.0005, 0.0005];% m, image-Z (elevation) offset range
+TileCfg.Rotation             = Geometry.Rotation;
+TileCfg.BB_center            = reshape(Geometry.BoundingBox.Center, 3, 1);
+
+% Canonical (un-tiled) ODE function. Per-streamline tiled odefun is built
+% inside track_bubble.
 odefun = @(t,y) VELOCITY_SCALE * transpose(...
     get_velocity(transpose(y), Grid, vtuStruct.velocities));
 
@@ -107,7 +120,8 @@ if useparfor
             radii_cell{         n}  ...
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
-            vtuStruct, inlet, odefun, options, showStreamlines);    
+            vtuStruct, inlet, odefun, options, showStreamlines, ...
+            VELOCITY_SCALE, TileCfg);
     end
 
     % Assign the streamline values in the cells to the matrices:
@@ -125,7 +139,7 @@ else
     %----------------------------------------------------------------------
     
     for n = 1:NBubbles
-        
+
         disp(['Tracking microbubble ' num2str(n)...
             ' of ' num2str(NBubbles) '.']);
 
@@ -137,8 +151,9 @@ else
             radii(         :, n) ...
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
-            vtuStruct, inlet, odefun, options, showStreamlines);
-        
+            vtuStruct, inlet, odefun, options, showStreamlines, ...
+            VELOCITY_SCALE, TileCfg);
+
     end
     
 end
@@ -198,7 +213,7 @@ end
 
 function [streamlines, velocities, streamNumbers, radii] = ...
     track_bubble(Microbubble, Acquisition, Grid, vtuStruct, inlet, ...
-    odefun, options, showStreamlines)
+    odefun, options, showStreamlines, VELOCITY_SCALE, TileCfg)
 
 %--------------------------------------------------------------------------
 % GET USER PARAMETERS
@@ -228,8 +243,12 @@ velocities    = zeros(NPulses*NFrames,1,3);
 streamNumbers = zeros(NPulses*NFrames,1,1);
 radii         = zeros(NPulses*NFrames,1,1);
 
-% Position the bubble in the bulk of the vessel:
-startPosition = draw_start_position(1, vtuStruct);
+% Sample the first streamline tile (per-streamline transform) and produce
+% the corresponding tiled odefun, event handler, and start position.
+[tileRot, tileOffset] = sample_tile(TileCfg);
+[odefun_eff, options_eff, startPosition] = ...
+    build_tile_problem(TileCfg, tileRot, tileOffset, ...
+        Grid, vtuStruct, options, VELOCITY_SCALE, odefun);
 
 tspan = acquisitionTimes;
 
@@ -243,8 +262,8 @@ while max(t)<max(acquisitionTimes)
     %------------------------------------------------------------------
     if length(tspan)<2
         t = tspan; positions = startPosition;
-    else 
-        [t,positions] = ode23(odefun,tspan,startPosition(:),options);
+    else
+        [t,positions] = ode23(odefun_eff,tspan,startPosition(:),options_eff);
     end
 
     %------------------------------------------------------------------
@@ -268,18 +287,29 @@ while max(t)<max(acquisitionTimes)
     streamlines(I_acquisition, 1,:) = positions(I,:);
     streamNumbers(I_acquisition, 1) = streamCount;
 
-    % Get the velocities at the microbubble positions:
-    velocities(I_acquisition, 1,:) = get_velocity(...
-        positions(I,:), Grid, vtuStruct.velocities);
+    % Get the velocities at the microbubble positions. Map the tiled
+    % positions back to canonical vessel coords for the lookup, then rotate
+    % the looked-up velocity into the tile.
+    if TileCfg.Enabled
+        canonicalPos = transpose(tileRot' * (positions(I,:)' - ...
+            TileCfg.BB_center - tileOffset) + TileCfg.BB_center);
+        v_canonical = get_velocity(canonicalPos, Grid, vtuStruct.velocities);
+        velocities(I_acquisition, 1, :) = transpose(tileRot * v_canonical');
+    else
+        velocities(I_acquisition, 1, :) = get_velocity(...
+            positions(I,:), Grid, vtuStruct.velocities);
+    end
 
     % Draw a radius from the size distribution:
     radii(I_acquisition, 1) = draw_random_radii(P,R,1);
 
     %------------------------------------------------------------------
-    % GET A NEW BUBBLE
+    % GET A NEW BUBBLE (fresh tile + start position per streamline)
     %------------------------------------------------------------------
-    % Position a new bubble randomly in the vessel volume:
-    startPosition = draw_start_position(1, vtuStruct);
+    [tileRot, tileOffset] = sample_tile(TileCfg);
+    [odefun_eff, options_eff, startPosition] = ...
+        build_tile_problem(TileCfg, tileRot, tileOffset, ...
+            Grid, vtuStruct, options, VELOCITY_SCALE, odefun);
 
     % Update time array (remaining time):
     tspan = acquisitionTimes(find(acquisitionTimes>t(end),1):end);
@@ -288,4 +318,89 @@ while max(t)<max(acquisitionTimes)
 
 end
 
+end
+
+
+%==========================================================================
+% TILE HELPERS
+%==========================================================================
+
+function [tileRot, tileOffset] = sample_tile(TileCfg)
+% Sample a per-streamline tile transform. Returns the vessel-space rotation
+% matrix and translation column vector that map canonical vessel positions
+% into the tiled position. When tiling is disabled, returns identity / zero.
+
+if ~TileCfg.Enabled
+    tileRot = eye(3);
+    tileOffset = zeros(3, 1);
+    return
+end
+
+% Random offset in image space: [depth; width; elevation]
+T_img = [
+    rand_in(TileCfg.DepthRange);
+    rand_in(TileCfg.WidthRange);
+    rand_in(TileCfg.ElevRange)];
+
+% Random rotation about the elevation axis (image z) so the vessel flow
+% direction in the imaging plane is randomised per streamline.
+if TileCfg.RandomizeRotation
+    theta = 2*pi*rand;
+    R_theta_img = [cos(theta), -sin(theta), 0;
+                   sin(theta),  cos(theta), 0;
+                   0,           0,          1];
+else
+    R_theta_img = eye(3);
+end
+
+% Convert from image-space transform to vessel-space transform. The
+% vessel-to-image map is image = R_geom * (vessel - BB_center) + Geom.Center,
+% so an image-space rotation about Geom.Center by R_theta_img and translation
+% by T_img corresponds (in vessel space) to:
+%   vessel' = R_v * (vessel - BB_center) + BB_center + T_v
+% with R_v = R_geom' * R_theta_img * R_geom and T_v = R_geom' * T_img.
+R_geom     = TileCfg.Rotation;
+tileRot    = R_geom' * R_theta_img * R_geom;
+tileOffset = R_geom' * T_img;
+
+end
+
+
+function [odefun_eff, options_eff, startPosition] = ...
+    build_tile_problem(TileCfg, tileRot, tileOffset, Grid, vtuStruct, ...
+                       options, VELOCITY_SCALE, odefun_canonical)
+% Build the tile-aware ODE function, ODE event options, and a fresh start
+% position for the next streamline.
+
+if ~TileCfg.Enabled
+    odefun_eff    = odefun_canonical;
+    options_eff   = options;
+    startPosition = draw_start_position(1, vtuStruct);
+    return
+end
+
+BB = TileCfg.BB_center;
+
+% Map a tiled vessel-space point back to canonical vessel-space:
+to_canonical = @(y) tileRot' * (y - BB - tileOffset) + BB;
+
+% ODE in tiled space: lookup velocity at canonical position, rotate result
+% into the tile.
+odefun_eff = @(t, y) VELOCITY_SCALE * (tileRot * transpose( ...
+    get_velocity(transpose(to_canonical(y)), Grid, vtuStruct.velocities)));
+
+% Event detection still uses the canonical Grid -- transform y first.
+options_eff = odeset(options, 'Events', ...
+    @(t, y) exitVesselFcn(t, to_canonical(y), Grid));
+
+% Sample a canonical start position then transform it into the tile.
+canonical_start = draw_start_position(1, vtuStruct);  % 1x3 row
+startPosition = transpose( ...
+    tileRot * (canonical_start' - BB) + BB + tileOffset);
+
+end
+
+
+function r = rand_in(range)
+r = range(1) + rand * (range(2) - range(1));
 end

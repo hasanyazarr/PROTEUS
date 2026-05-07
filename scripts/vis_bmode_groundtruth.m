@@ -39,7 +39,7 @@ if ~exist(VIS_FOLDER, 'dir'), mkdir(VIS_FOLDER); end
 % SVD clutter filter: remove first N singular values (tissue)
 SVD_CUTOFF = 2;   % 1-2 is usually enough (first SV dominates clutter)
 
-dynamicRange = 40; % dB
+dynamicRange = 60; % dB (widened from 40 so small/dim SonoVue bubbles are visible)
 
 %==========================================================================
 % LOAD SETTINGS
