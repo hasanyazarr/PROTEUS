@@ -29,7 +29,7 @@ input_args = {...
 
 % DeleteData only supported by 3DC/3DG (C binary); kspaceFirstOrder3D rejects it
 if isfield(run_param,'BINARY_PATH')
-    input_args = [input_args {'DeleteData', false}];  % Keep h5 files for debugging
+    input_args = [input_args {'DeleteData', true}];  % Delete h5 files after each frame to save disk
 end
 
 if isfield(run_param,'DATA_PATH') 
