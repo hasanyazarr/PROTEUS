@@ -63,6 +63,20 @@ options = odeset(options,'Events',@(t,y)exitVesselFcn(t,y,Grid));
 % Velocity scaling factor (increase to speed up MB flow):
 VELOCITY_SCALE = 5;
 
+% Random vessel-volume seeding can otherwise pick stagnant/near-stagnant
+% cells, which creates MBs that appear fixed across many frames. Weight
+% start-position sampling toward the faster half of the CFD velocity field.
+SeedCfg.Enabled = true;
+SeedCfg.MinSpeedPercentile = 50;
+SeedCfg.WeightPower = 1;
+[vtuStruct, SeedStats] = apply_velocity_weighted_seeding(vtuStruct, SeedCfg);
+if SeedCfg.Enabled
+    fprintf(['Velocity-weighted MB seeding: keeping %.1f%% of vessel cells ' ...
+        '(min speed %.4g m/s, median %.4g m/s, max %.4g m/s)\n'], ...
+        100 * SeedStats.KeptFraction, SeedStats.MinSpeed, ...
+        SeedStats.MedianSpeed, SeedStats.MaxSpeed);
+end
+
 % --- Vessel tiling: replicate the canonical vessel across the imaging FOV
 % with a random per-streamline offset (and optional rotation about the
 % elevation axis) so MBs cover the whole image plane and flow in different
@@ -185,6 +199,8 @@ FlowSimulationParameters.NumberOfFrames = NFrames;
 
 FlowSimulationParameters.Microbubble.Distribution.Probabilities = P;
 FlowSimulationParameters.Microbubble.Distribution.Radii         = R;
+FlowSimulationParameters.Seeding = SeedCfg;
+FlowSimulationParameters.Seeding.Stats = SeedStats;
 
 save([PATHS.GroundTruthPath, filesep, savefolder, ...
     filesep,'FlowSimulationParameters.mat'],'FlowSimulationParameters');
@@ -403,4 +419,56 @@ end
 
 function r = rand_in(range)
 r = range(1) + rand * (range(2) - range(1));
+end
+
+
+function [vtuStruct, stats] = apply_velocity_weighted_seeding(vtuStruct, cfg)
+% Add vtuStruct.density so draw_start_position samples moving vessel cells.
+
+speed = vecnorm(vtuStruct.velocities, 2, 2);
+positive = speed(speed > 0);
+
+stats.MinSpeed = 0;
+stats.MedianSpeed = 0;
+stats.MaxSpeed = 0;
+stats.KeptFraction = 1;
+
+if isempty(positive)
+    vtuStruct = rmfield_if_exists(vtuStruct, 'density');
+    return
+end
+
+sorted_speed = sort(positive);
+stats.MedianSpeed = sorted_speed(max(1, ceil(0.50 * numel(sorted_speed))));
+stats.MaxSpeed = sorted_speed(end);
+
+if ~cfg.Enabled
+    vtuStruct = rmfield_if_exists(vtuStruct, 'density');
+    return
+end
+
+pct = min(max(cfg.MinSpeedPercentile, 0), 100);
+idx = max(1, ceil((pct / 100) * numel(sorted_speed)));
+stats.MinSpeed = sorted_speed(idx);
+
+density = speed .^ cfg.WeightPower;
+density(speed < stats.MinSpeed) = 0;
+
+if sum(density) <= 0
+    density = speed;
+end
+if sum(density) <= 0
+    vtuStruct = rmfield_if_exists(vtuStruct, 'density');
+    return
+end
+
+vtuStruct.density = density / sum(density);
+stats.KeptFraction = mean(vtuStruct.density > 0);
+end
+
+
+function s = rmfield_if_exists(s, name)
+if isfield(s, name)
+    s = rmfield(s, name);
+end
 end

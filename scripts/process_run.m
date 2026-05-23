@@ -1,5 +1,5 @@
 function process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, ...
-    VIZ_OUT, DATASET_OUT, MODE, VIDEO_FPS, SIGMA_PX)
+    VIZ_OUT, DATASET_OUT, MODE, VIDEO_FPS, SIGMA_PX, ELEVATION_FILTER_MM)
 % PROCESS_RUN  Combined visualization + super-resolution dataset export.
 %
 % Loads RF data, computes the SVD-filtered + DAS-beamformed B-mode stack
@@ -25,12 +25,15 @@ function process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, ...
 %   MODE            'full' (default) or 'preview' -- preview skips video
 %   VIDEO_FPS       FPS of the per-frame video (default 60). 'full' only.
 %   SIGMA_PX        Gaussian sigma (px) for the HR target (default 1.5)
+%   ELEVATION_FILTER_MM  Keep GT labels with |elevation| <= this value
+%                   (default 1.0 mm). Pass Inf to disable.
 
 if nargin < 4, VIZ_OUT     = ''; end
 if nargin < 5, DATASET_OUT = ''; end
 if nargin < 6 || isempty(MODE),      MODE = 'full'; end
 if nargin < 7 || isempty(VIDEO_FPS), VIDEO_FPS = 60; end
 if nargin < 8 || isempty(SIGMA_PX),  SIGMA_PX = 1.5; end
+if nargin < 9 || isempty(ELEVATION_FILTER_MM), ELEVATION_FILTER_MM = 1.0; end
 
 do_viz     = ~isempty(VIZ_OUT);
 do_dataset = ~isempty(DATASET_OUT);
@@ -254,7 +257,8 @@ if do_dataset
         dpath = fullfile(DATASET_OUT, subdirs{d});
         if ~exist(dpath, 'dir'), mkdir(dpath); end
     end
-    fprintf('=== Writing dataset (sigma=%.1f px) to %s ===\n', SIGMA_PX, DATASET_OUT);
+    fprintf('=== Writing dataset (sigma=%.1f px, |elev|<=%.2f mm) to %s ===\n', ...
+        SIGMA_PX, ELEVATION_FILTER_MM, DATASET_OUT);
 
     % LR images: clamp at DYNRANGE_DATASET, normalise to [0,1]
     IMG_db_ds = max(IMG_db, -DYNRANGE_DATASET);
@@ -270,8 +274,8 @@ if do_dataset
         frame_tag = num2str(iframe, ['%0' num2str(npad) 'd']);
         lr_frame = LR_all(:,:,iframe);
 
-        [gt_mm, gt_px] = load_gt_for_export(GT_FOLDER, iframe, npad_gt, ...
-            pulse_name, Geometry, x_lat_mm, z_ax_mm);
+        [gt_mm, gt_px, gt_elev_mm] = load_gt_for_export(GT_FOLDER, iframe, npad_gt, ...
+            pulse_name, Geometry, x_lat_mm, z_ax_mm, ELEVATION_FILTER_MM);
 
         hr_frame = zeros(Nz, Nx, 'single');
         for b = 1:size(gt_px, 1)
@@ -296,7 +300,7 @@ if do_dataset
         save(fullfile(DATASET_OUT, 'mat', 'blob',        ['frame_' frame_tag '.mat']), 'lr_frame', '-v6');
         save(fullfile(DATASET_OUT, 'mat', 'gauss_point', ['frame_' frame_tag '.mat']), 'hr_frame', '-v6');
         save(fullfile(DATASET_OUT, 'coordinates',        ['frame_' frame_tag '.mat']), ...
-            'gt_coords_mm', 'gt_coords_px', '-v6');
+            'gt_coords_mm', 'gt_coords_px', 'gt_elev_mm', '-v6');
         imwrite(uint8(lr_frame * 255), ...
             fullfile(DATASET_OUT, 'frames','blob',        ['frame_' frame_tag '.png']));
         imwrite(uint8(hr_frame * 255), ...
@@ -322,6 +326,7 @@ if do_dataset
     metadata.settings_file  = SETTINGS_PATH;
     metadata.results_folder = RESULTS_FOLDER;
     metadata.gt_folder      = GT_FOLDER;
+    metadata.elevation_filter_mm = ELEVATION_FILTER_MM;
     save(fullfile(DATASET_OUT, 'metadata.mat'), 'metadata', '-v6');
     fprintf('  metadata.mat saved\n');
 end
@@ -398,11 +403,11 @@ gt_mm = [pts(:,2)*1e3, pts(:,1)*1e3];
 end
 
 
-function [gt_mm, gt_px] = load_gt_for_export(gt_folder, frame_idx, npad, ...
-    pulse_name, Geom, x_lat_mm, z_ax_mm)
+function [gt_mm, gt_px, gt_elev_mm] = load_gt_for_export(gt_folder, frame_idx, npad, ...
+    pulse_name, Geom, x_lat_mm, z_ax_mm, elevation_filter_mm)
 gt_file = fullfile(gt_folder, sprintf('Frame_%s.mat', ...
     num2str(frame_idx, ['%0' num2str(npad) 'd'])));
-gt_mm = zeros(0, 2); gt_px = zeros(0, 2);
+gt_mm = zeros(0, 2); gt_px = zeros(0, 2); gt_elev_mm = zeros(0, 1);
 if ~exist(gt_file, 'file'), return; end
 gt_data = load(gt_file, 'Frame');
 if ~isfield(gt_data.Frame, pulse_name), return; end
@@ -413,10 +418,13 @@ pts = pts + Geom.Center;
 pts = pts';
 lat_mm = pts(:,2) * 1e3;
 ax_mm  = pts(:,1) * 1e3;
+elev_mm = pts(:,3) * 1e3;
 gt_mm  = [lat_mm, ax_mm];
 col_px = interp1(x_lat_mm, 1:length(x_lat_mm), lat_mm, 'linear', NaN);
 row_px = interp1(z_ax_mm,  1:length(z_ax_mm),  ax_mm,  'linear', NaN);
-valid  = ~isnan(col_px) & ~isnan(row_px);
+valid  = ~isnan(col_px) & ~isnan(row_px) & ...
+    (abs(elev_mm) <= elevation_filter_mm);
 gt_mm = gt_mm(valid, :);
 gt_px = [col_px(valid), row_px(valid)];
+gt_elev_mm = elev_mm(valid);
 end
