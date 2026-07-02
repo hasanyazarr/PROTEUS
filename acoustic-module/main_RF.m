@@ -56,6 +56,9 @@ end
 % Check if the microbubble properties and the acquisition properties for
 % the ground truth data match the simulation properties:
 check_ground_truth_data(groundtruthfolder,Acquisition,Microbubble,savedir)
+flow_params = load(fullfile(groundtruthfolder, 'FlowSimulationParameters.mat'), ...
+    'FlowSimulationParameters');
+FlowSimulationParameters = flow_params.FlowSimulationParameters;
 
 disp(['RF data will be saved in: ' newline savedir '.' newline])
 
@@ -66,17 +69,30 @@ disp('Creating k-Wave grid ...')
 % Define the k-Wave medium:
 if Acquisition.Continue
     disp('Loading k-Wave medium ...')
-    load([savedir '/medium.mat'],'medium')
+    medium_file = [savedir '/medium.mat'];
+    medium_data = load(medium_file,'medium');
+    medium = medium_data.medium;
+    medium_var_info = whos('-file', medium_file);
+    medium_vars = {medium_var_info.name};
+    if any(strcmp(medium_vars, 'medium_metadata'))
+        medium_metadata_data = load(medium_file, 'medium_metadata');
+        medium_metadata = medium_metadata_data.medium_metadata;
+    else
+        medium_metadata = struct();
+    end
     Medium.Save = false; % No need to save the medium again
 else
     disp('Creating k-Wave medium ...')
-    [medium, vessel_grid] = define_medium(Grid, Medium, Geometry);
+    [medium, vessel_grid, medium_metadata] = ...
+        define_medium(Grid, Medium, Geometry, FlowSimulationParameters);
 end
+assert_tiling_metadata_matches(FlowSimulationParameters, medium_metadata);
 
 % Save the k-Wave medium
 if Medium.Save
     disp('Saving k-Wave medium ...')
-    save([savedir '/medium.mat'],'medium','vessel_grid','Grid','-v7.3')
+    save([savedir '/medium.mat'],'medium','vessel_grid','Grid', ...
+        'medium_metadata','-v7.3')
 end
 
 % Distribute integration points at the transducer surface:
@@ -276,4 +292,35 @@ if saveExecutionTimes == true
     save([savedir filesep file_name], 'execution_times')
 end
 
+end
+
+
+function assert_tiling_metadata_matches(FlowSimulationParameters, medium_metadata)
+gt_tiling = struct();
+if isfield(FlowSimulationParameters, 'Tiling')
+    gt_tiling = FlowSimulationParameters.Tiling;
+end
+if ~isfield(gt_tiling, 'Enabled')
+    gt_tiling.Enabled = false;
+end
+if ~isfield(medium_metadata, 'Tiling')
+    medium_tiling.Enabled = false;
+else
+    medium_tiling = medium_metadata.Tiling;
+end
+if ~isfield(medium_tiling, 'Enabled')
+    medium_tiling.Enabled = false;
+end
+if gt_tiling.Enabled ~= medium_tiling.Enabled
+    error('main_RF:TilingMetadataMismatch', ...
+        'Ground-truth tiling metadata does not match medium tiling metadata.')
+end
+if gt_tiling.Enabled
+    if ~isfield(gt_tiling, 'Transforms') || ...
+            ~isfield(medium_tiling, 'Transforms') || ...
+            numel(gt_tiling.Transforms) ~= numel(medium_tiling.Transforms)
+        error('main_RF:TilingMetadataMismatch', ...
+            'Tiled GT requires matching tiled medium transform metadata.')
+    end
+end
 end

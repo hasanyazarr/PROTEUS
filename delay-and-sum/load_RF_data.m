@@ -1,4 +1,4 @@
-function RF_matrix = load_RF_data(resultsFolder,pulsingScheme)
+function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo] = load_RF_data(resultsFolder,pulsingScheme)
 % LOAD_RF_DATA reads RF data files and applies a pulsing scheme.
 %
 % RF = LOAD_RF_DATA(resultsFolder,pulsingScheme) reads the RF data in the
@@ -6,6 +6,10 @@ function RF_matrix = load_RF_data(resultsFolder,pulsingScheme)
 % data. RF is an Nelem-by-Nt-by-Nframes array, where Nelem is the number of
 % transducer elements, Nt the number of time samples, and Nframes the
 % number of frames.
+%
+% [RF, FrameNumbers, RFFileNames, PulseInfo] also returns the original source
+% frame numbers, source RF files, and pulse-combination metadata. Export code
+% must use FrameNumbers when looking up ground-truth labels.
 %
 % Guillaume Lajoinie, Nathan Blanken, University of Twente, 2023
 
@@ -18,6 +22,10 @@ FrameNumbers = arrayfun(@(F) str2double(F.name(7:end-4)),filelist);
 % Sort the file list by frame number:
 [~, I] = sort(FrameNumbers);
 filelist = filelist(I);
+FrameNumbers = FrameNumbers(I);
+RFFileNames = arrayfun(@(F) fullfile(F.folder, F.name), filelist, ...
+    'UniformOutput', false);
+PulseInfo = get_pulse_info(pulsingScheme);
 
 % Load a sample RF data frame:
 load(fullfile(filelist(1).folder, filelist(1).name),'RF');
@@ -53,4 +61,33 @@ for iframe = 1:Nframes
     
 end
 
+end
+
+
+function PulseInfo = get_pulse_info(pulsingScheme)
+PulseInfo.PulsingScheme = pulsingScheme;
+switch pulsingScheme
+    case 'Amplitude modulation'
+        PulseInfo.PulseIDsUsed = [3 1 2];
+        PulseInfo.CombinationFormula = 'RF{3}-RF{1}-RF{2}';
+        PulseInfo.LabelPulsePolicy = ...
+            'pulse_resolved_labels_plus_combined_target_from_pulses_3_1_2';
+    case 'Pulse inversion'
+        PulseInfo.PulseIDsUsed = [1 2];
+        PulseInfo.CombinationFormula = 'RF{1}+RF{2}';
+        PulseInfo.LabelPulsePolicy = ...
+            'pulse_resolved_labels_plus_combined_target_from_pulses_1_2';
+    case 'Amplitude modulation with pulse inversion'
+        PulseInfo.PulseIDsUsed = [3 1 2];
+        PulseInfo.CombinationFormula = 'RF{3}+RF{1}+RF{2}';
+        PulseInfo.LabelPulsePolicy = ...
+            'pulse_resolved_labels_plus_combined_target_from_pulses_3_1_2';
+    case 'Standard'
+        PulseInfo.PulseIDsUsed = 1;
+        PulseInfo.CombinationFormula = 'RF{1}';
+        PulseInfo.LabelPulsePolicy = 'single_pulse1_label';
+    otherwise
+        error('load_RF_data:UnknownPulsingScheme', ...
+            'Unknown pulsing scheme: %s', pulsingScheme);
+end
 end

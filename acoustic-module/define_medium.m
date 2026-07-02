@@ -1,4 +1,5 @@
-function [medium, vessel] = define_medium(Grid, Medium, Geometry)
+function [medium, vessel, MediumMetadata] = define_medium(...
+    Grid, Medium, Geometry, FlowSimulationParameters)
 %DEFINE_MEDIUM returns a k-Wave medium struct (a voxel-based representation
 %of the acoustic properties of the medium) based on the grid properties in
 %Grid and the medium properties in Medium.
@@ -30,6 +31,10 @@ function [medium, vessel] = define_medium(Grid, Medium, Geometry)
 
 % Grid dimensions
 Nx = Grid.Nx; Ny = Grid.Ny; Nz = Grid.Nz;
+if nargin < 4
+    FlowSimulationParameters = struct();
+end
+MediumMetadata.Tiling = get_medium_tiling_metadata(FlowSimulationParameters);
 
 %==========================================================================
 % Medium inhomegeneity
@@ -77,16 +82,14 @@ Geometry.STLfile = [Geometry.GeometriesPath filesep Geometry.Folder ...
 
 if Geometry.EmbedVessel
     % Read STL data:
-    V = READ_stl(Geometry.STLfile);
+    V_raw = READ_stl(Geometry.STLfile);
 
-    % Translate and rotate STL vertex coordinates:
-    V = V*Geometry.STLunit;
-    V = V - transpose(Geometry.BoundingBox.Center);
-    V = rotate_stl(V,Geometry.Rotation);
-    V = V + transpose(Geometry.Center);
-
-    % convert STL mesh to voxels:
-    vessel = VOXELISE(Grid.x, Grid.y, Grid.z, V);
+    vessel = zeros(Nx, Ny, Nz, 'logical');
+    transforms = MediumMetadata.Tiling.Transforms;
+    for tileIdx = 1:numel(transforms)
+        V = apply_tile_transform_to_stl(V_raw, transforms(tileIdx), Geometry);
+        vessel = vessel | VOXELISE(Grid.x, Grid.y, Grid.z, V);
+    end
 else
     vessel = zeros(Nx, Ny, Nz,'logical');
 end
@@ -119,6 +122,44 @@ for i = 1:3
     V = transpose(meshXYZ(:,:,i)); % 3-by-N matrix of vertex coordinates
     V = R*V;                       % Rotate the vertex coordinates
     meshXYZ(:,:,i) = transpose(V); % Assign result
+end
+
+
+function V = apply_tile_transform_to_stl(V_raw, transform, Geometry)
+V = V_raw * Geometry.STLunit;
+BB = reshape(Geometry.BoundingBox.Center, 3, 1);
+for i = 1:3
+    vertices = transpose(V(:,:,i));
+    vertices = transform.Rotation * (vertices - BB) + BB + transform.Offset;
+    V(:,:,i) = transpose(vertices);
+end
+V = V - transpose(Geometry.BoundingBox.Center);
+V = rotate_stl(V,Geometry.Rotation);
+V = V + transpose(Geometry.Center);
+end
+
+
+function tiling = get_medium_tiling_metadata(FlowSimulationParameters)
+tiling.Enabled = false;
+tiling.TransformFrame = 'vessel_to_image_consistent';
+tiling.Transforms = struct( ...
+    'TileID', 1, ...
+    'Rotation', eye(3), ...
+    'Offset', zeros(3, 1), ...
+    'TransformFrame', tiling.TransformFrame);
+if isfield(FlowSimulationParameters, 'Tiling')
+    tiling = FlowSimulationParameters.Tiling;
+    if ~isfield(tiling, 'TransformFrame')
+        tiling.TransformFrame = 'vessel_to_image_consistent';
+    end
+    if ~isfield(tiling, 'Transforms') || isempty(tiling.Transforms)
+        tiling.Transforms = struct( ...
+            'TileID', 1, ...
+            'Rotation', eye(3), ...
+            'Offset', zeros(3, 1), ...
+            'TransformFrame', tiling.TransformFrame);
+    end
+end
 end
 
 end

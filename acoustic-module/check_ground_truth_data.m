@@ -62,6 +62,22 @@ if FlowSimulationParameters.NumberOfFrames ~= ...
     param = 'number of frames';
 end
 
+if isfield(Acquisition, 'VelocityScale') && ~isempty(Acquisition.VelocityScale)
+    if isfield(FlowSimulationParameters, 'Velocity') && ...
+            isfield(FlowSimulationParameters.Velocity, 'Scale')
+        velocity_scale_gt = FlowSimulationParameters.Velocity.Scale;
+    elseif isfield(FlowSimulationParameters, 'VelocityScale')
+        velocity_scale_gt = FlowSimulationParameters.VelocityScale;
+    else
+        velocity_scale_gt = [];
+    end
+    if isempty(velocity_scale_gt) || ...
+            str2double(num2str(velocity_scale_gt,d)) ~= ...
+            str2double(num2str(Acquisition.VelocityScale,d))
+        param = 'velocity scale';
+    end
+end
+
 if ~isempty(param)
     error(['The ' param ' in the ground truth data and the ' param ...
         ' in the simulation settings do not match.'])

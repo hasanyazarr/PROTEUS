@@ -60,8 +60,12 @@ inlet = inlet.inlet;
 load(GeometryPropertiesFilename,'options');
 options = odeset(options,'Events',@(t,y)exitVesselFcn(t,y,Grid));
 
-% Velocity scaling factor (increase to speed up MB flow):
-VELOCITY_SCALE = 5;
+% Velocity scaling factor for MB trajectory integration and effective labels:
+if isfield(Acquisition, 'VelocityScale') && ~isempty(Acquisition.VelocityScale)
+    VELOCITY_SCALE = Acquisition.VelocityScale;
+else
+    VELOCITY_SCALE = 5;
+end
 
 % Random vessel-volume seeding can otherwise pick stagnant/near-stagnant
 % cells, which creates MBs that appear fixed across many frames. Weight
@@ -80,7 +84,7 @@ end
 % --- Vessel tiling: replicate the canonical vessel across the imaging FOV
 % with a random per-streamline offset (and optional rotation about the
 % elevation axis) so MBs cover the whole image plane and flow in different
-% directions. Set ENABLE_TILING=false to restore single-vessel behaviour.
+% directions. Set TileCfg.Enabled=false to restore single-vessel behaviour.
 TileCfg.Enabled              = true;
 TileCfg.RandomizeRotation    = true;          % rotate flow direction in image plane
 TileCfg.DepthRange           = [-0.025, 0.002];  % m, image-X (depth) offset range
@@ -88,6 +92,13 @@ TileCfg.WidthRange           = [-0.015, 0.015];  % m, image-Y (lateral) offset r
 TileCfg.ElevRange            = [-0.0005, 0.0005];% m, image-Z (elevation) offset range
 TileCfg.Rotation             = Geometry.Rotation;
 TileCfg.BB_center            = reshape(Geometry.BoundingBox.Center, 3, 1);
+TileCfg.TransformFrame = 'vessel_to_image_consistent';
+TileCfg.RandomSeed           = 0;
+TileCfg.NumTiles             = max(1, NBubbles);
+if isfield(Acquisition, 'Tiling') && ~isempty(Acquisition.Tiling)
+    TileCfg = merge_struct(TileCfg, Acquisition.Tiling);
+end
+TileCfg.Transforms = build_tile_transforms(TileCfg);
 
 % Canonical (un-tiled) ODE function. Per-streamline tiled odefun is built
 % inside track_bubble.
@@ -103,7 +114,9 @@ odefun = @(t,y) VELOCITY_SCALE * transpose(...
 % counts, and radii:
 streamlines   = zeros(NPulses*NFrames, NBubbles,3);
 velocities    = zeros(NPulses*NFrames, NBubbles,3);
+rawVelocities = zeros(NPulses*NFrames, NBubbles,3);
 streamNumbers = zeros(NPulses*NFrames, NBubbles);
+tileIDs       = zeros(NPulses*NFrames, NBubbles);
 radii         = zeros(NPulses*NFrames, NBubbles);
 
 t1 = tic;
@@ -118,7 +131,9 @@ if useparfor
     % Cells for storing the output of the parallel operations:
     streamlines_cell   = cell(1, NBubbles);
     velocities_cell    = cell(1, NBubbles);
+    rawVelocities_cell = cell(1, NBubbles);
     streamNumbers_cell = cell(1, NBubbles);
+    tileIDs_cell       = cell(1, NBubbles);
     radii_cell         = cell(1, NBubbles);
 
     parfor n = 1:NBubbles
@@ -130,19 +145,23 @@ if useparfor
         [...
             streamlines_cell{   n}, ...
             velocities_cell{    n}, ...
+            rawVelocities_cell{ n}, ...
             streamNumbers_cell{ n}, ...
+            tileIDs_cell{       n}, ...
             radii_cell{         n}  ...
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, TileCfg);
+            VELOCITY_SCALE, TileCfg, n);
     end
 
     % Assign the streamline values in the cells to the matrices:
     for n = 1:NBubbles
         streamlines(  :, n,:) = streamlines_cell{   n};
         velocities(   :, n,:) = velocities_cell{    n};
+        rawVelocities(:, n,:) = rawVelocities_cell{ n};
         streamNumbers(:, n)   = streamNumbers_cell{ n};
+        tileIDs(      :, n)   = tileIDs_cell{       n};
         radii(        :, n)   = radii_cell{         n};
     end
     
@@ -161,12 +180,14 @@ else
         [...
             streamlines(   :, n, :), ...
             velocities(    :, n, :), ...
+            rawVelocities( :, n, :), ...
             streamNumbers( :, n), ...
+            tileIDs(       :, n), ...
             radii(         :, n) ...
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, TileCfg);
+            VELOCITY_SCALE, TileCfg, n);
 
     end
     
@@ -183,7 +204,9 @@ disp('Saving data ...')
 
 streamlines   = reshape(streamlines,   NPulses, NFrames, NBubbles, 3);
 velocities    = reshape(velocities,    NPulses, NFrames, NBubbles, 3);
+rawVelocities = reshape(rawVelocities, NPulses, NFrames, NBubbles, 3);
 streamNumbers = reshape(streamNumbers, NPulses, NFrames, NBubbles);
+tileIDs       = reshape(tileIDs,       NPulses, NFrames, NBubbles);
 radii         = reshape(radii,         NPulses, NFrames, NBubbles);
 
 if ~exist([PATHS.GroundTruthPath filesep savefolder],'dir')
@@ -199,6 +222,15 @@ FlowSimulationParameters.NumberOfFrames = NFrames;
 
 FlowSimulationParameters.Microbubble.Distribution.Probabilities = P;
 FlowSimulationParameters.Microbubble.Distribution.Radii         = R;
+FlowSimulationParameters.VelocityScale = VELOCITY_SCALE;
+FlowSimulationParameters.Velocity.Scale = VELOCITY_SCALE;
+FlowSimulationParameters.Velocity.RawUnits = 'm/s from CFD VTU field before scaling';
+FlowSimulationParameters.Velocity.EffectiveUnits = ...
+    'm/s after Velocity.Scale, matching integrated point displacement';
+FlowSimulationParameters.Velocity.LabelFieldDefinition = ...
+    'Frame.PulseN.Velocity is effective scaled velocity; Frame.PulseN.RawVelocity is unscaled CFD velocity in the same coordinate frame.';
+FlowSimulationParameters.Tiling = TileCfg;
+FlowSimulationParameters.Tiling.Transforms = TileCfg.Transforms;
 FlowSimulationParameters.Seeding = SeedCfg;
 FlowSimulationParameters.Seeding.Stats = SeedStats;
 
@@ -213,8 +245,10 @@ for m = 1:NFrames
 
         Frame.(pulse).Points       = reshape(streamlines(   n,m,:,:), NBubbles, 3);
         Frame.(pulse).Velocity     = reshape(velocities(    n,m,:,:), NBubbles, 3);
+        Frame.(pulse).RawVelocity  = reshape(rawVelocities( n,m,:,:), NBubbles, 3);
         Frame.(pulse).Radius       = reshape(radii(         n,m,:,:), NBubbles, 1);
         Frame.(pulse).StreamNumber = reshape(streamNumbers( n,m,:,:), NBubbles, 1);
+        Frame.(pulse).TileID       = reshape(tileIDs(       n,m,:,:), NBubbles, 1);
 
     end
     
@@ -227,9 +261,9 @@ end
 
 
 
-function [streamlines, velocities, streamNumbers, radii] = ...
+function [streamlines, velocities, rawVelocities, streamNumbers, tileIDs, radii] = ...
     track_bubble(Microbubble, Acquisition, Grid, vtuStruct, inlet, ...
-    odefun, options, showStreamlines, VELOCITY_SCALE, TileCfg)
+    odefun, options, showStreamlines, VELOCITY_SCALE, TileCfg, initialTileID)
 
 %--------------------------------------------------------------------------
 % GET USER PARAMETERS
@@ -256,12 +290,15 @@ R = Microbubble.Distribution.Radii;
 
 streamlines   = zeros(NPulses*NFrames,1,3);
 velocities    = zeros(NPulses*NFrames,1,3);
+rawVelocities = zeros(NPulses*NFrames,1,3);
 streamNumbers = zeros(NPulses*NFrames,1,1);
+tileIDs       = zeros(NPulses*NFrames,1,1);
 radii         = zeros(NPulses*NFrames,1,1);
 
 % Sample the first streamline tile (per-streamline transform) and produce
 % the corresponding tiled odefun, event handler, and start position.
-[tileRot, tileOffset] = sample_tile(TileCfg);
+tileID = next_tile_id(TileCfg, initialTileID);
+[tileRot, tileOffset] = sample_tile(TileCfg, tileID);
 [odefun_eff, options_eff, startPosition] = ...
     build_tile_problem(TileCfg, tileRot, tileOffset, ...
         Grid, vtuStruct, options, VELOCITY_SCALE, odefun);
@@ -302,6 +339,7 @@ while max(t)<max(acquisitionTimes)
 
     streamlines(I_acquisition, 1,:) = positions(I,:);
     streamNumbers(I_acquisition, 1) = streamCount;
+    tileIDs(I_acquisition, 1) = tileID;
 
     % Get the velocities at the microbubble positions. Map the tiled
     % positions back to canonical vessel coords for the lookup, then rotate
@@ -310,10 +348,13 @@ while max(t)<max(acquisitionTimes)
         canonicalPos = transpose(tileRot' * (positions(I,:)' - ...
             TileCfg.BB_center - tileOffset) + TileCfg.BB_center);
         v_canonical = get_velocity(canonicalPos, Grid, vtuStruct.velocities);
-        velocities(I_acquisition, 1, :) = transpose(tileRot * v_canonical');
+        rawVelocities(I_acquisition, 1, :) = transpose(tileRot * v_canonical');
+        velocities(I_acquisition, 1, :) = ...
+            VELOCITY_SCALE * transpose(tileRot * v_canonical');
     else
-        velocities(I_acquisition, 1, :) = get_velocity(...
-            positions(I,:), Grid, vtuStruct.velocities);
+        v_raw = get_velocity(positions(I,:), Grid, vtuStruct.velocities);
+        rawVelocities(I_acquisition, 1, :) = v_raw;
+        velocities(I_acquisition, 1, :) = VELOCITY_SCALE * v_raw;
     end
 
     % Draw a radius from the size distribution:
@@ -322,7 +363,8 @@ while max(t)<max(acquisitionTimes)
     %------------------------------------------------------------------
     % GET A NEW BUBBLE (fresh tile + start position per streamline)
     %------------------------------------------------------------------
-    [tileRot, tileOffset] = sample_tile(TileCfg);
+    tileID = next_tile_id(TileCfg, initialTileID + streamCount);
+    [tileRot, tileOffset] = sample_tile(TileCfg, tileID);
     [odefun_eff, options_eff, startPosition] = ...
         build_tile_problem(TileCfg, tileRot, tileOffset, ...
             Grid, vtuStruct, options, VELOCITY_SCALE, odefun);
@@ -341,11 +383,70 @@ end
 % TILE HELPERS
 %==========================================================================
 
-function [tileRot, tileOffset] = sample_tile(TileCfg)
+function TileCfg = merge_struct(TileCfg, override)
+fields = fieldnames(override);
+for i = 1:numel(fields)
+    TileCfg.(fields{i}) = override.(fields{i});
+end
+end
+
+
+function transforms = build_tile_transforms(TileCfg)
+numTiles = max(1, TileCfg.NumTiles);
+transforms = repmat(struct( ...
+    'TileID', 1, ...
+    'Rotation', eye(3), ...
+    'Offset', zeros(3, 1), ...
+    'TransformFrame', TileCfg.TransformFrame), numTiles, 1);
+
+if ~TileCfg.Enabled
+    transforms(1).TileID = 1;
+    transforms(1).Rotation = eye(3);
+    transforms(1).Offset = zeros(3, 1);
+    transforms = transforms(1);
+    return
+end
+
+rng_state = rng;
+rng(TileCfg.RandomSeed);
+for tileID = 1:numTiles
+    [tileRot, tileOffset] = sample_tile_random(TileCfg);
+    transforms(tileID).TileID = tileID;
+    transforms(tileID).Rotation = tileRot;
+    transforms(tileID).Offset = tileOffset;
+    transforms(tileID).TransformFrame = TileCfg.TransformFrame;
+end
+rng(rng_state);
+end
+
+
+function tileID = next_tile_id(TileCfg, idx)
+tileID = mod(idx - 1, numel(TileCfg.Transforms)) + 1;
+end
+
+
+function [tileRot, tileOffset] = sample_tile(TileCfg, tileID)
 % Sample a per-streamline tile transform. Returns the vessel-space rotation
 % matrix and translation column vector that map canonical vessel positions
 % into the tiled position. When tiling is disabled, returns identity / zero.
 
+if isfield(TileCfg, 'Transforms') && ~isempty(TileCfg.Transforms)
+    transform = TileCfg.Transforms(tileID);
+    tileRot = transform.Rotation;
+    tileOffset = transform.Offset;
+    return
+end
+
+if ~TileCfg.Enabled
+    tileRot = eye(3);
+    tileOffset = zeros(3, 1);
+    return
+end
+[tileRot, tileOffset] = sample_tile_random(TileCfg);
+end
+
+
+function [tileRot, tileOffset] = sample_tile_random(TileCfg)
 if ~TileCfg.Enabled
     tileRot = eye(3);
     tileOffset = zeros(3, 1);

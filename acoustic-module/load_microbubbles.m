@@ -35,9 +35,16 @@ MB.points = transpose(points);
 
 % Radii of the microbubbles:
 MB.radii = Frame.Radius;
+if isfield(Frame, 'TileID')
+    MB.tile_ids = Frame.TileID;
+end
 
 % Microbubble velocities:
 MB.velocities = Frame.Velocity;
 MB.velocities = MB.velocities*transpose(Geometry.Rotation);
+if isfield(Frame, 'RawVelocity')
+    MB.raw_velocities = Frame.RawVelocity;
+    MB.raw_velocities = MB.raw_velocities*transpose(Geometry.Rotation);
+end
 
 end
