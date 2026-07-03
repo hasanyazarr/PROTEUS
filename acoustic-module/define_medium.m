@@ -123,6 +123,7 @@ for i = 1:3
     V = R*V;                       % Rotate the vertex coordinates
     meshXYZ(:,:,i) = transpose(V); % Assign result
 end
+end
 
 
 function V = apply_tile_transform_to_stl(V_raw, transform, Geometry)
@@ -160,6 +161,4 @@ if isfield(FlowSimulationParameters, 'Tiling')
             'TransformFrame', tiling.TransformFrame);
     end
 end
-end
-
 end

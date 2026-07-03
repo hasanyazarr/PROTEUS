@@ -141,6 +141,16 @@ def test_tiling_contract_saves_transforms_and_tile_ids():
     assert "MB.tile_ids" in mb_src
 
 
+def test_define_medium_closes_rotate_helper_before_tiling_helpers():
+    src = read("acoustic-module/define_medium.m")
+
+    rotate_idx = src.index("function meshXYZ = rotate_stl")
+    apply_idx = src.index("function V = apply_tile_transform_to_stl")
+    between_helpers = src[rotate_idx:apply_idx]
+
+    assert between_helpers.splitlines().count("end") >= 2
+
+
 def test_label_policy_is_configurable_and_frame_counts_are_saved():
     src = read("scripts/process_run.m")
 
