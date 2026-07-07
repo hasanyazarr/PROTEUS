@@ -158,3 +158,32 @@ def test_label_policy_is_configurable_and_frame_counts_are_saved():
     assert "PREPROCESSING_OPTIONS.LabelPolicy" in src
     assert "LabelCountsByPulseAndReason" in src
     assert "sample_metadata.LabelCountsByPulseAndReason" in src
+
+
+def test_define_sensor_mb_all_uses_current_acquisition_window():
+    src = read("acoustic-module/define_sensor_MB_all.m")
+
+    assert "frame_start = Acquisition.StartFrame;" in src
+    assert "frame_end   = Acquisition.EndFrame;" in src
+    assert "frame_start = 1;" not in src
+    assert "frame_end   = Nframes;" not in src
+
+
+def test_main_rf_splits_transducer_and_mb_transmit_batches():
+    src = read("acoustic-module/main_RF.m")
+
+    assert "get_transmit_batch_size(SimulationParameters, Acquisition)" in src
+    assert "make_frame_batches(Acquisition.StartFrame, Acquisition.EndFrame" in src
+    assert "sensor_data_transducer_1iter" in src
+    assert "sensor_data_MB_1iter" in src
+    assert "Simulating transducer-only transmit wave." in src
+    assert "Simulating MB-only transmit wave." in src
+    assert "kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;" in src
+    assert "extract_sensor_subset" in src
+
+
+def test_main_rf_preserves_global_frame_numbering_after_internal_batching():
+    src = read("acoustic-module/main_RF.m")
+
+    assert "num_padding=num2str(length(num2str(Acquisition.NumberOfFrames)))" in src
+    assert "file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];" in src

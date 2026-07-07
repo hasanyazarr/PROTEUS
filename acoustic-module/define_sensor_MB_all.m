@@ -12,15 +12,12 @@ function [sensor, MB_idx_all, max_mb] = define_sensor_MB_all(...
 %
 % Nathan Blanken, Alina Kuliesh, Guillaume Lajoinie, 2023
 
-% Build the sensor mask over the UNION of bubble positions across all
-% frames (1..NumberOfFrames), not just the current batch's StartFrame..EndFrame.
-% The transmit pulse simulation records pressure at every grid point in this
-% mask; if a later batch queries a position that the mask did not cover, the
-% recorded pressure would be missing. Looping over all frames here makes the
-% mask (and the cached transmit recording) reusable across batches.
+% Build the sensor mask over the UNION of bubble positions in the current
+% Acquisition.StartFrame..Acquisition.EndFrame window. The total
+% NumberOfFrames is still used for ground-truth filename padding.
 Nframes     = Acquisition.NumberOfFrames; % Total number of ground truth frames
-frame_start = 1;
-frame_end   = Nframes;
+frame_start = Acquisition.StartFrame;
+frame_end   = Acquisition.EndFrame;
 
 sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz);
 max_mb = 1;

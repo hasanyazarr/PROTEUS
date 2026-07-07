@@ -123,10 +123,6 @@ switch Acquisition.PulsingScheme
         sequence = {'odd' 'even' 'minus'};
 end
 
-% define sensor
-[sensor_MB_all, MB_idx_all, max_mb] = define_sensor_MB_all(...
-    Grid, groundtruthfolder, Acquisition, length(sequence), Geometry);
-
 %==========================================================================
 % strucutre for time and memory estimation
 param.c_max = Medium.SpeedOfSoundMaximum;
@@ -135,7 +131,7 @@ param.tr = run_param.tr;
 param.num_frames = Acquisition.EndFrame - Acquisition.StartFrame + 1;
 param.num_pulse = Acquisition.NumberOfPulses;
 param.num_int = SimulationParameters.NumberOfInteractions;
-param.max_mb = max_mb;
+param.max_mb = Microbubble.Number;
 param.PML = Grid.PML;
 
 %==========================================================================
@@ -147,24 +143,7 @@ disp('Creating k-Wave sensor object for transducer.')
 
 mask_idx_trans = find(logical(sensor_transducer.mask));
 
-if ~isempty(intersect(MB_idx_all, mask_idx_trans))
-    warning('Microbubbles on transducer.')
-end
-
-if SimulationParameters.HybridSimulation
-    % Add the two sensor masks:
-    sensor.mask = logical(sensor_MB_all.mask + sensor_transducer.mask);
-    sensor.record = sensor_MB_all.record;
-
-    % Record sufficiently long for a round trip:
-    kgrid.Nt = floor(run_param.tr(3) / kgrid.dt) + 1;
-else
-    sensor = sensor_MB_all;
-    kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;
-end
-
 source_transducer = cell(1,length(sequence));
-sensor_data_1iter = cell(1,length(sequence));
 
 % define_source_transducer is fast; always recompute. Only the run_simulation
 % call below (the actual transmit pulse propagation) is expensive enough to
@@ -175,22 +154,6 @@ for pulse_seq_idx = 1 : length(sequence)
     source_transducer{pulse_seq_idx} = define_source_transducer(...
         Transducer, Transmit, Medium, Grid, transpose(sensor_weights), ...
         mask_idx_trans);
-end
-
-for pulse_seq_idx = 1 : length(sequence)
-    % Simulation time and memory estimation:
-    if pulse_seq_idx == 1 && estimate == true
-        beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
-        estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
-            beta_coeff_file);
-    end
-
-    disp('Simulating transmit wave.')
-    t_tx = tic;
-    sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
-        medium, source_transducer{pulse_seq_idx}, sensor);
-    fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', ...
-        pulse_seq_idx, toc(t_tx));
 end
 
 %==========================================================================
@@ -205,48 +168,177 @@ saveExecutionTimes = false;
 
 num_frames_to_process = Acquisition.EndFrame - Acquisition.StartFrame + 1;
 
-for frame = Acquisition.StartFrame : Acquisition.EndFrame
-    display(['frame ', num2str(frame)])
-    
-    RF = cell(1,length(sequence));
-    Frame = cell(1,length(sequence));
-    
-    for pulse_seq_idx = 1 : length(sequence)
-        
-        MB = load_microbubbles(groundtruthfolder, frame, pulse_seq_idx, Geometry, ...
-            Acquisition.NumberOfFrames);
-        
-        % define the sensor of the current frame
-        [sensor_frame, sensor_weights_frame, MB, run_param.max_dist] = ...
-            define_sensor_MB(Grid, MB);
-        
-        mask_idx       = find(logical(sensor.mask));
-        mask_idx_frame = find(logical(sensor_frame.mask));
-        
-        % Split sensor data into microbubble sensor data and transducer
-        % sensor data.
-        [sensor_data_MB, sensor_data_trans] = extract_sensor_data(...
-            sensor_data_1iter{pulse_seq_idx}, ...
-            mask_idx, mask_idx_trans, mask_idx_frame, run_param, kgrid);
-        
-        % Pressure sensed by the microbubbles
-        sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
-        sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
-        
-        % Complete the transducer sensor data with microbubble sources:
-        if SimulationParameters.HybridSimulation
-            
-            sensor_data = hybrid_simulator(...
-                mask_idx_trans,...
-                sensed_p, ...
-                MB, Grid, medium, run_param, ...
-                Medium, Microbubble, Transmit);
+if SimulationParameters.HybridSimulation
+    transmit_batch_size = get_transmit_batch_size(...
+        SimulationParameters, Acquisition);
+    frame_batches = make_frame_batches(Acquisition.StartFrame, Acquisition.EndFrame, transmit_batch_size);
 
-            % Update sensor data transducer:
-            sensor_data.p = sensor_data_trans.p + sensor_data.p;
-            
-        else
-            
+    sensor_data_transducer_1iter = cell(1,length(sequence));
+    kgrid.Nt = floor(run_param.tr(3) / kgrid.dt) + 1;
+
+    for pulse_seq_idx = 1 : length(sequence)
+        % Simulation time and memory estimation:
+        if pulse_seq_idx == 1 && estimate == true
+            beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
+            estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
+                beta_coeff_file);
+        end
+
+        disp('Simulating transducer-only transmit wave.')
+        t_tx = tic;
+        sensor_data_transducer_1iter{pulse_seq_idx} = run_simulation(...
+            run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
+            sensor_transducer);
+        fprintf('[TIMING] Transducer transmit wave (pulse %d): %.2f s\n', ...
+            pulse_seq_idx, toc(t_tx));
+    end
+
+    for batch_idx = 1:size(frame_batches, 1)
+        batch_start = frame_batches(batch_idx, 1);
+        batch_end = frame_batches(batch_idx, 2);
+        fprintf('=== MB transmit batch %d/%d: frames %d-%d ===\n', ...
+            batch_idx, size(frame_batches, 1), batch_start, batch_end);
+
+        AcquisitionBatch = Acquisition;
+        AcquisitionBatch.StartFrame = batch_start;
+        AcquisitionBatch.EndFrame = batch_end;
+        [sensor_MB_batch, MB_idx_all, max_mb_batch] = define_sensor_MB_all(...
+            Grid, groundtruthfolder, AcquisitionBatch, length(sequence), ...
+            Geometry);
+        param.max_mb = max(param.max_mb, max_mb_batch);
+
+        if ~isempty(intersect(MB_idx_all, mask_idx_trans))
+            warning('Microbubbles on transducer.')
+        end
+
+        mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
+        sensor_data_MB_1iter = cell(1,length(sequence));
+        kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;
+
+        for pulse_seq_idx = 1 : length(sequence)
+            disp('Simulating MB-only transmit wave.')
+            t_tx = tic;
+            sensor_data_MB_1iter{pulse_seq_idx} = run_simulation(...
+                run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
+                sensor_MB_batch);
+            fprintf('[TIMING] MB transmit wave (pulse %d, frames %d-%d): %.2f s\n', ...
+                pulse_seq_idx, batch_start, batch_end, toc(t_tx));
+        end
+
+        for frame = batch_start : batch_end
+            display(['frame ', num2str(frame)])
+
+            RF = cell(1,length(sequence));
+            Frame = cell(1,length(sequence));
+
+            for pulse_seq_idx = 1 : length(sequence)
+
+                MB = load_microbubbles(groundtruthfolder, frame, pulse_seq_idx, ...
+                    Geometry, Acquisition.NumberOfFrames);
+
+                % define the sensor of the current frame
+                [sensor_frame, sensor_weights_frame, MB, run_param.max_dist] = ...
+                    define_sensor_MB(Grid, MB);
+
+                mask_idx_frame = find(logical(sensor_frame.mask));
+                n_mb_time = floor(run_param.tr(1) / kgrid.dt) + 1;
+
+                sensor_data_MB = extract_sensor_subset(...
+                    sensor_data_MB_1iter{pulse_seq_idx}, ...
+                    mask_idx_MB_batch, mask_idx_frame, n_mb_time);
+                sensor_data_trans = sensor_data_transducer_1iter{pulse_seq_idx};
+
+                % Pressure sensed by the microbubbles
+                sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
+                sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
+
+                % Complete the transducer sensor data with microbubble sources:
+                sensor_data = hybrid_simulator(...
+                    mask_idx_trans,...
+                    sensed_p, ...
+                    MB, Grid, medium, run_param, ...
+                    Medium, Microbubble, Transmit);
+
+                % Update sensor data transducer:
+                sensor_data.p = sensor_data_trans.p + sensor_data.p;
+
+                % Compute element RF data recorded by transducer:
+                t_rf = tic;
+                [RF{pulse_seq_idx}, run_param] = compute_RF_data(...
+                    Transducer,sensor_data,sensor_weights,Grid,run_param);
+                fprintf('[TIMING] compute_RF_data: %.2f s\n', toc(t_rf));
+
+                Frame{pulse_seq_idx} = MB;
+
+            end
+
+            % Save data
+            dt = kgrid.dt;
+            % Find out how many zero padding you'll need for file name
+            num_padding=num2str(length(num2str(Acquisition.NumberOfFrames)));
+            file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];
+            save([savedir filesep file_name], 'RF', 'dt', 'Frame')
+
+            execution_times(frame) = toc(tstart);
+
+        end
+    end
+else
+    [sensor_MB_all, MB_idx_all, max_mb] = define_sensor_MB_all(...
+        Grid, groundtruthfolder, Acquisition, length(sequence), Geometry);
+    param.max_mb = max_mb;
+
+    if ~isempty(intersect(MB_idx_all, mask_idx_trans))
+        warning('Microbubbles on transducer.')
+    end
+
+    sensor = sensor_MB_all;
+    kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;
+    sensor_data_1iter = cell(1,length(sequence));
+
+    for pulse_seq_idx = 1 : length(sequence)
+        % Simulation time and memory estimation:
+        if pulse_seq_idx == 1 && estimate == true
+            beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
+            estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
+                beta_coeff_file);
+        end
+
+        disp('Simulating transmit wave.')
+        t_tx = tic;
+        sensor_data_1iter{pulse_seq_idx} = run_simulation(run_param, kgrid, ...
+            medium, source_transducer{pulse_seq_idx}, sensor);
+        fprintf('[TIMING] Transmit wave (pulse %d): %.2f s\n', ...
+            pulse_seq_idx, toc(t_tx));
+    end
+
+    for frame = Acquisition.StartFrame : Acquisition.EndFrame
+        display(['frame ', num2str(frame)])
+
+        RF = cell(1,length(sequence));
+        Frame = cell(1,length(sequence));
+
+        for pulse_seq_idx = 1 : length(sequence)
+
+            MB = load_microbubbles(groundtruthfolder, frame, pulse_seq_idx, Geometry, ...
+                Acquisition.NumberOfFrames);
+
+            % define the sensor of the current frame
+            [sensor_frame, sensor_weights_frame, MB, run_param.max_dist] = ...
+                define_sensor_MB(Grid, MB);
+
+            mask_idx       = find(logical(sensor.mask));
+            mask_idx_frame = find(logical(sensor_frame.mask));
+
+            % Split sensor data into microbubble sensor data.
+            [sensor_data_MB, ~] = extract_sensor_data(...
+                sensor_data_1iter{pulse_seq_idx}, ...
+                mask_idx, mask_idx_trans, mask_idx_frame, run_param, kgrid);
+
+            % Pressure sensed by the microbubbles
+            sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
+            sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
+
             sensor_data = full_simulator(...
                 source_transducer{pulse_seq_idx}, ...
                 sensor_transducer,...
@@ -254,28 +346,27 @@ for frame = Acquisition.StartFrame : Acquisition.EndFrame
                 sensed_p,...
                 MB, kgrid, Grid, medium, run_param, ...
                 Medium, Microbubble, Transmit);
-            
+
+            % Compute element RF data recorded by transducer:
+            t_rf = tic;
+            [RF{pulse_seq_idx}, run_param] = compute_RF_data(...
+                Transducer,sensor_data,sensor_weights,Grid,run_param);
+            fprintf('[TIMING] compute_RF_data: %.2f s\n', toc(t_rf));
+
+            Frame{pulse_seq_idx} = MB;
+
         end
-        
-        % Compute element RF data recorded by transducer:
-        t_rf = tic;
-        [RF{pulse_seq_idx}, run_param] = compute_RF_data(...
-            Transducer,sensor_data,sensor_weights,Grid,run_param);
-        fprintf('[TIMING] compute_RF_data: %.2f s\n', toc(t_rf));
-        
-        Frame{pulse_seq_idx} = MB;
-        
+
+        % Save data
+        dt = kgrid.dt;
+        % Find out how many zero padding you'll need for file name
+        num_padding=num2str(length(num2str(Acquisition.NumberOfFrames)));
+        file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];
+        save([savedir filesep file_name], 'RF', 'dt', 'Frame')
+
+        execution_times(frame) = toc(tstart);
+
     end
-    
-    % Save data
-    dt = kgrid.dt;
-    % Find out how many zero padding you'll need for file name
-    num_padding=num2str(length(num2str(Acquisition.NumberOfFrames)));
-    file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];
-    save([savedir filesep file_name], 'RF', 'dt', 'Frame')
-    
-    execution_times(frame) = toc(tstart);
-    
 end
 
 % Report time for frames + MB part
@@ -292,6 +383,52 @@ if saveExecutionTimes == true
     save([savedir filesep file_name], 'execution_times')
 end
 
+end
+
+
+function batch_size = get_transmit_batch_size(SimulationParameters, Acquisition)
+num_frames = Acquisition.EndFrame - Acquisition.StartFrame + 1;
+if num_frames < 1
+    error('main_RF:InvalidFrameRange', ...
+        'Acquisition.EndFrame must be greater than or equal to StartFrame.')
+end
+
+if isfield(SimulationParameters, 'TransmitBatchSize') && ...
+        ~isempty(SimulationParameters.TransmitBatchSize)
+    batch_size = SimulationParameters.TransmitBatchSize;
+else
+    batch_size = 50;
+end
+
+if isinf(batch_size) || batch_size == 0
+    batch_size = num_frames;
+end
+
+if ~isnumeric(batch_size) || ~isscalar(batch_size) || ...
+        batch_size < 1 || floor(batch_size) ~= batch_size
+    error('main_RF:InvalidTransmitBatchSize', ...
+        'SimulationParameters.TransmitBatchSize must be a positive integer, Inf, or 0.')
+end
+
+batch_size = min(batch_size, num_frames);
+end
+
+
+function frame_batches = make_frame_batches(start_frame, end_frame, batch_size)
+num_batches = ceil((end_frame - start_frame + 1) / batch_size);
+frame_batches = zeros(num_batches, 2);
+for batch_idx = 1:num_batches
+    batch_start = start_frame + (batch_idx - 1) * batch_size;
+    batch_end = min(end_frame, batch_start + batch_size - 1);
+    frame_batches(batch_idx, :) = [batch_start, batch_end];
+end
+end
+
+
+function sensor_subset = extract_sensor_subset(...
+    sensor_data, source_mask_idx, target_mask_idx, n_time_points)
+[~, sensor_data_idx, ~] = intersect(source_mask_idx, target_mask_idx);
+sensor_subset.p = sensor_data.p(sensor_data_idx, 1:n_time_points);
 end
 
 
