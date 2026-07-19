@@ -81,6 +81,17 @@ if SeedCfg.Enabled
         SeedStats.MedianSpeed, SeedStats.MaxSpeed);
 end
 
+% Domain-aware seed cropping (general, config-adaptive). When enabled, restrict
+% seeding to vessel cells inside the simulated domain box (Geometry.Domain) so
+% microbubbles start where they are actually imaged, without hand-tuning tiling
+% offset ranges. Pair with zero tiling offsets (the crop is the confinement).
+if isfield(Acquisition, 'ConfineSeedsToDomain') && Acquisition.ConfineSeedsToDomain
+    [vtuStruct, CropStats] = crop_vessel_to_domain(vtuStruct, Geometry, 0.15);
+    fprintf(['Domain-crop seeding: %.1f%% of vessel cells inside domain box ' ...
+        '(%d seedable cells)\n'], 100*CropStats.InBoxFraction, ...
+        CropStats.SeedableCells);
+end
+
 % --- Vessel tiling: replicate the canonical vessel across the imaging FOV
 % with a random per-streamline offset (and optional rotation about the
 % elevation axis) so MBs cover the whole image plane and flow in different

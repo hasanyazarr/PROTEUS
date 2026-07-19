@@ -187,3 +187,9 @@ def test_main_rf_preserves_global_frame_numbering_after_internal_batching():
 
     assert "num_padding=num2str(length(num2str(Acquisition.NumberOfFrames)))" in src
     assert "file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];" in src
+
+
+def test_v4_notebook_normalizes_geometry_rotation_before_persisting_settings():
+    notebook = (ROOT.parent / "notebooks/proteus_data_generation_v4.ipynb").read_text()
+
+    assert "Geometry.Rotation = double(Geometry.Rotation);" in notebook
