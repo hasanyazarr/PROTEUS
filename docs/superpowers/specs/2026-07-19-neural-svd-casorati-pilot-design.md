@@ -94,6 +94,29 @@ The Colab experiment will produce:
 - saved model checkpoints and run configuration;
 - a concise pass/fail summary comparing NeuralSVD, direct factorization, and exact SVD.
 
+## Assignment Format
+
+The experiment is delivered in a CS231n-style learning format. Each assignment is exactly one independently runnable Colab cell containing:
+
+- a short statement of the mathematical goal;
+- provided imports, setup, and non-essential boilerplate;
+- a small number of focused `TODO` blocks for the learner;
+- shape and behavior expectations without revealing the implementation;
+- local assertions or reference checks that identify which contract failed;
+- one or two interpretation questions after a successful run.
+
+The learner implements the scientific core while loading, plotting, reporting, timing, and persistence scaffolding are provided. Work is divided into seven cells:
+
+1. Casorati data validation and normalization;
+2. exact and truncated SVD references;
+3. sampled matrix operator;
+4. neural singular-function models;
+5. nested low-rank objective;
+6. training and checkpointing;
+7. fidelity, runtime, and go/no-go evaluation.
+
+Each cell must pass its own checks before the next cell is attempted. Assistance follows a progressive ladder: conceptual hint, pseudocode, localized implementation hint, and full solution only when explicitly requested.
+
 ## Out of Scope
 
 - Integration into MATLAB `process_run.m`;
