@@ -56,6 +56,24 @@ reports both of them alongside every timing row:
 | `Microbubble.GPUMaxStride` | `6` | Upper bound on the coarse output grid. `1` integrates every microbubble sample and disables spline interpolation. |
 | `Microbubble.GPURK4MaxPhaseStep` | `0.25` | Maximum phase advanced per RK4 substep [rad]. Substeps scale with the stride. |
 
+k-Wave ships `kspaceFirstOrder3DC.m` with `export LD_LIBRARY_PATH=;`, which
+blanks the loader path before launching the CUDA binary. The binary then cannot
+find `libcuda.so.1` and reports `Insufficient CUDA driver version ... but 0.0
+is installed`. Patch that line to export the driver directories, exactly as the
+production notebooks do:
+
+```python
+import pathlib, re
+wrapper = pathlib.Path(
+    '/content/PROTEUS/k-wave-toolbox-version-1.3/k-Wave/kspaceFirstOrder3DC.m')
+cuda_paths = '/usr/local/cuda/lib64:/usr/lib64-nvidia:/usr/local/cuda/lib64/stubs'
+wrapper.write_text(re.sub(r'export LD_LIBRARY_PATH=[^;]*;',
+                          f'export LD_LIBRARY_PATH={cuda_paths};',
+                          wrapper.read_text()))
+```
+
+Preflight refuses to start when the blanking line is still present.
+
 `Medium.AttenuationB` must not be exactly `1.0`: `kspaceFirstOrder-CUDA`
 refuses that power law exponent outright, and the evaluation always runs on
 `3DG`. Preflight rejects it before the k-Wave precomputation. `1.01` is the

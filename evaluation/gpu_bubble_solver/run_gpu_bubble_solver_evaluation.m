@@ -124,6 +124,23 @@ if ~exist(cudaBinary, 'file')
     error('gpuBubbleEvaluation:MissingKWaveBinary', ...
         'k-Wave CUDA binary not found: %s', cudaBinary)
 end
+% k-Wave ships kspaceFirstOrder3DC.m with "export LD_LIBRARY_PATH=;", which
+% blanks the loader path before launching the binary. The CUDA build then
+% cannot find libcuda.so.1 and aborts with "Insufficient CUDA driver version
+% ... but 0.0 is installed" after the precomputation has already run.
+solverWrapper = which('kspaceFirstOrder3DC');
+if isempty(solverWrapper)
+    error('gpuBubbleEvaluation:MissingKWaveWrapper', ...
+        'kspaceFirstOrder3DC.m is not on the MATLAB path.')
+end
+if contains(fileread(solverWrapper), 'export LD_LIBRARY_PATH=;')
+    error('gpuBubbleEvaluation:BlankCudaLibraryPath', ...
+        ['%s blanks LD_LIBRARY_PATH before launching the CUDA binary, so ' ...
+         'libcuda.so.1 cannot be found. Patch that line to export the CUDA ' ...
+         'driver directories (for example /usr/local/cuda/lib64:' ...
+         '/usr/lib64-nvidia:/usr/local/cuda/lib64/stubs) before running.'], ...
+        solverWrapper)
+end
 % The CUDA solver rejects a power law exponent of exactly one, and this
 % evaluation always runs on 3DG. Fail here rather than after the k-Wave
 % precomputation has already been paid for.
