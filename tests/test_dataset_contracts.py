@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -189,7 +191,24 @@ def test_main_rf_preserves_global_frame_numbering_after_internal_batching():
     assert "file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];" in src
 
 
-def test_v4_notebook_normalizes_geometry_rotation_before_persisting_settings():
-    notebook = (ROOT.parent / "notebooks/proteus_data_generation_v4.ipynb").read_text()
+def test_v4_notebook_normalizes_every_settings_struct_before_persisting():
+    """The notebook used to widen only Geometry.Rotation. It now passes every
+    loaded settings struct through normalize_settings_types, so no other
+    integer/single field can reach k-Wave arithmetic either.
 
-    assert "Geometry.Rotation = double(Geometry.Rotation);" in notebook
+    The notebook lives in the surrounding workspace, not in this repo, so this
+    test is skipped wherever the repo is checked out on its own (e.g. Colab).
+    """
+    notebook_path = ROOT.parent / "notebooks/proteus_data_generation_v4.ipynb"
+    if not notebook_path.is_file():
+        pytest.skip("workspace notebook not present next to the repo")
+
+    notebook = notebook_path.read_text()
+
+    for name in ("Acquisition", "Geometry", "Medium", "Microbubble",
+                 "SimulationParameters", "Transducer", "Transmit"):
+        assert f"{name} = normalize_settings_types({name});" in notebook
+
+    # The notebook must not carry its own copy of the function any more; the
+    # tracked implementation is the one that has to run.
+    assert "%%writefile /content/PROTEUS/normalize_settings_types.m" not in notebook
