@@ -128,3 +128,14 @@ def test_marmottant_liquid_surface_tension_is_read_per_bubble():
     # the shells agree, so every shell field it reads has to be per-bubble.
     assert "s_sigl = gpuArray(toPrecision(shell(1).sig_l));" not in source
     assert source.count("toPrecision([shell.sig_l])") == 3
+
+
+def test_rk4_step_follows_each_coarse_interval_width():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # The appended final index can leave an interval narrower than the stride,
+    # so the step has to come from the interval, not from the nominal stride.
+    assert "h_interval = gpu_coarse_step_sizes(idx_coarse, dt, n_sub);" in source
+    assert "hn  = h_interval(n);" in source
+    for stale in ("x + h2*k1x", "xd+h2*k1v", "x + h*k3x", "h6 * (k1x"):
+        assert stale not in source

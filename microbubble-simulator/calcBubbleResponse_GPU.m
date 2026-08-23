@@ -126,9 +126,13 @@ C5 = gpuArray(toPrecision(4)*nu / (P0*T));
 C6 = gpuArray(toPrecision(4)*Ks./(P0*R0*T));
 invP0 = toPrecision(1) / P0;
 
-%% Precompute step-size fractions
-h2 = toPrecision(0.5) * h;
-h6 = h / toPrecision(6);
+%% Per-interval step sizes
+% Appending the final sample to the coarse grid can leave a last interval
+% that is shorter than the stride. Stepping the nominal strided h across it
+% would integrate past the end of the pulse, so each interval gets the step
+% its own width implies. The substep count stays as sized for the full
+% stride, which only makes the short interval more accurate, not less.
+h_interval = gpu_coarse_step_sizes(idx_coarse, dt, n_sub);
 two = toPrecision(2);
 
 %% Precompute pressure at coarse grid points to avoid per-iteration indexing
@@ -181,6 +185,9 @@ stage_fracs = [sub_fracs(1:end-1)', ...
 for n = 1:(N_coarse-1)
     Pn = P_coarse(:, n)';    % [1 x N_MB] — precomputed, fast indexing
     dP = dP_coarse(:, n)';
+    hn  = h_interval(n);
+    hn2 = toPrecision(0.5) * hn;
+    hn6 = hn / toPrecision(6);
     if isempty(Hm_lo)
         mLo = [];
         mHi = [];
@@ -196,18 +203,18 @@ for n = 1:(N_coarse-1)
 
         track_invalid_state(x);
         [k1x, k1v] = rp_rhs(x,          xd,          Ps);
-        k2StateX = x + h2*k1x;
+        k2StateX = x + hn2*k1x;
         track_invalid_state(k2StateX);
-        [k2x, k2v] = rp_rhs(k2StateX,   xd+h2*k1v,   Pm);
-        k3StateX = x + h2*k2x;
+        [k2x, k2v] = rp_rhs(k2StateX,   xd+hn2*k1v,  Pm);
+        k3StateX = x + hn2*k2x;
         track_invalid_state(k3StateX);
-        [k3x, k3v] = rp_rhs(k3StateX,   xd+h2*k2v,   Pm);
-        k4StateX = x + h*k3x;
+        [k3x, k3v] = rp_rhs(k3StateX,   xd+hn2*k2v,  Pm);
+        k4StateX = x + hn*k3x;
         track_invalid_state(k4StateX);
-        [k4x, k4v] = rp_rhs(k4StateX,   xd+h*k3v,    Pe);
+        [k4x, k4v] = rp_rhs(k4StateX,   xd+hn*k3v,   Pe);
 
-        x  = x  + h6 * (k1x + two*k2x + two*k3x + k4x);
-        xd = xd + h6 * (k1v + two*k2v + two*k3v + k4v);
+        x  = x  + hn6 * (k1x + two*k2x + two*k3x + k4x);
+        xd = xd + hn6 * (k1v + two*k2v + two*k3v + k4v);
     end
 
     X_coarse(n+1,:)  = x;

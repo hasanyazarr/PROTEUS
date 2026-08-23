@@ -120,6 +120,34 @@ assert(nargout('calcBubbleResponse_GPU') == 3);
 
 disp('GPU bubble solver helper tests passed.')
 
+%% Coarse step sizes cover the grid exactly, short last interval included.
+dt = 1e-3;
+nSub = 3;
+% 10 samples at stride 4 leaves a final interval one sample wide.
+idxCoarse = int32([1, 5, 9, 10]);
+hInterval = gpu_coarse_step_sizes(idxCoarse, dt, nSub);
+assert(numel(hInterval) == numel(idxCoarse) - 1);
+assert(abs(hInterval(1) - 4*dt/nSub) < eps);
+assert(abs(hInterval(end) - dt/nSub) < eps, ...
+    'The short final interval must not step the full stride.');
+% Integrating every substep must land exactly on the last sample.
+totalAdvance = sum(hInterval) * nSub;
+assert(abs(totalAdvance - (double(idxCoarse(end)) - 1)*dt) < 1e-12);
+
+% An evenly divided grid keeps a single uniform step.
+uniformH = gpu_coarse_step_sizes(int32([1, 5, 9]), dt, nSub);
+assert(all(abs(uniformH - 4*dt/nSub) < eps));
+
+% The step class follows dt, so the single-precision path stays single.
+assert(isa(gpu_coarse_step_sizes(int32([1, 3]), single(dt), nSub), 'single'));
+
+assert_error(@() gpu_coarse_step_sizes(int32(1), dt, nSub), ...
+    'calcBubbleResponse_GPU:InvalidCoarseGrid');
+assert_error(@() gpu_coarse_step_sizes(int32([1, 5, 5]), dt, nSub), ...
+    'calcBubbleResponse_GPU:InvalidCoarseGrid');
+assert_error(@() gpu_coarse_step_sizes(int32([1, 5]), dt, 0), ...
+    'calcBubbleResponse_GPU:InvalidSubstepCount');
+
 %% Pchip slopes reproduce MATLAB's own pchip interpolant.
 x = [0, 0.7, 1.1, 2.6, 3.0, 4.4];
 Y = [sin(3*x); exp(-x); [0, 0, 1, 1, 1, 2]];
