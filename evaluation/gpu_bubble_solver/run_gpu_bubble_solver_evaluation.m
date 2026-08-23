@@ -57,6 +57,7 @@ environment.gpu_rk4_max_phase_step = maxPhaseStep;
 environment.gpu_rk4_convergence_phase_step = maxPhaseStep / 2;
 environment.gpu_precision = gpuPrecision;
 environment.gpu_max_stride = gpuMaxStride;
+environment.interpolation_strides = [1, 2, 4, 6];
 environment.capture_solver = '3DG';
 write_json(fullfile(outputDir, 'environment.json'), environment)
 [interpolationMetrics, solverMetrics, analyticTimings, analyticDetails] = ...
@@ -147,7 +148,7 @@ environment.gpu_name = device.Name;
 environment.gpu_compute_capability = device.ComputeCapability;
 environment.gpu_total_memory_bytes = double(device.TotalMemory);
 environment.gpu_available_memory_bytes = double(device.AvailableMemory);
-environment.dtype = 'double';
+environment.cpu_dtype = 'double';
 environment.random_seed = seed;
 environment.settings_path = settingsPath;
 environment.settings_sha256 = command_output(sprintf( ...
@@ -171,6 +172,7 @@ end
 function [interpolationTable, solverTable, timingTable, details] = ...
         run_analytic_evaluation(frequencies, pressures, radii, ...
         samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, gpuMaxStride)
+interpolationStrides = [1, 2, 4, 6];
 [liquid, gas] = getMaterialProperties();
 liquid.ThermalModel = 'Prosperetti';
 [bubble, shell] = make_bubbles_and_shells(radii, liquid);
@@ -187,14 +189,18 @@ for frequency = frequencies
         pulse.gpuMaxStride = gpuMaxStride;
         [truthTime, truthPressure] = analytic_truth_pressure(...
             frequency, pressure, pulse.t(end), samplingRate * 16);
-        linearPressure = interp1(pulse.t, pulse.p(1, :), truthTime, ...
-            'linear', 0);
-        pchipPressure = interp1(pulse.t, pulse.p(1, :), truthTime, ...
-            'pchip', 0);
-        interpolationRows(end + 1) = interpolation_row(...
-            frequency, pressure, 'linear', truthPressure, linearPressure); %#ok<AGROW>
-        interpolationRows(end + 1) = interpolation_row(...
-            frequency, pressure, 'pchip', truthPressure, pchipPressure); %#ok<AGROW>
+        % The solver interpolates pressure across its strided output grid,
+        % so the interpolation error is measured at the same spacings.
+        for strideValue = interpolationStrides
+            [linearPressure, pchipPressure] = interpolate_strided_pressure(...
+                pulse, strideValue, truthTime);
+            interpolationRows(end + 1) = interpolation_row(...
+                frequency, pressure, 'linear', strideValue, ...
+                truthPressure, linearPressure); %#ok<AGROW>
+            interpolationRows(end + 1) = interpolation_row(...
+                frequency, pressure, 'pchip', strideValue, ...
+                truthPressure, pchipPressure); %#ok<AGROW>
+        end
 
         cpuTimer = tic;
         cpuResponse = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
@@ -232,10 +238,14 @@ for frequency = frequencies
             gpuMedianSeconds, NaN, gpuSolverInfo); %#ok<AGROW>
 
         if frequency == 18e6 && pressure == 200e3
+            solverStride = gpuSolverInfo.stride;
+            [solverLinear, solverPchip] = interpolate_strided_pressure(...
+                pulse, solverStride, truthTime);
             details.interpolation.t = truthTime;
             details.interpolation.truth = truthPressure;
-            details.interpolation.linear = linearPressure;
-            details.interpolation.pchip = pchipPressure;
+            details.interpolation.linear = solverLinear;
+            details.interpolation.pchip = solverPchip;
+            details.interpolation.stride = solverStride;
             details.interpolation.frequency = frequency;
             details.interpolation.pressure = pressure;
             selectedBubble = 3;
@@ -269,6 +279,20 @@ pulse.dispProgress = false;
 pulse.rk4MaxPhaseStep = maxPhaseStep;
 end
 
+function [linearPressure, pchipPressure] = interpolate_strided_pressure(...
+    pulse, stride, truthTime)
+% Reconstruct the driving pressure from the grid the solver integrates on.
+
+coarseTime = pulse.t(1:stride:end);
+coarsePressure = pulse.p(1, 1:stride:end);
+if coarseTime(end) ~= pulse.t(end)
+    coarseTime(end + 1) = pulse.t(end);
+    coarsePressure(end + 1) = pulse.p(1, end);
+end
+linearPressure = interp1(coarseTime, coarsePressure, truthTime, 'linear', 0);
+pchipPressure = interp1(coarseTime, coarsePressure, truthTime, 'pchip', 0);
+end
+
 function pressure = analytic_hann_pressure(time, frequency, amplitude)
 pulseDuration = 2 / frequency;
 pressure = zeros(size(time));
@@ -293,11 +317,13 @@ for i = numel(radii):-1:1
 end
 end
 
-function row = interpolation_row(frequency, pressure, method, truth, estimate)
+function row = interpolation_row(...
+    frequency, pressure, method, stride, truth, estimate)
 peakTruth = max(abs(truth));
 row.frequency_hz = frequency;
 row.pressure_pa = pressure;
 row.method = {method};
+row.stride = stride;
 row.nrmse = norm(estimate - truth) / max(norm(truth), eps);
 row.max_error_over_peak = max(abs(estimate - truth)) / max(peakTruth, eps);
 row.relative_peak_amplitude_error = ...
@@ -563,7 +589,7 @@ end
 
 function rows = empty_interpolation_rows()
 template = struct('frequency_hz', 0, 'pressure_pa', 0, 'method', {{}}, ...
-    'nrmse', 0, 'max_error_over_peak', 0, ...
+    'stride', 0, 'nrmse', 0, 'max_error_over_peak', 0, ...
     'relative_peak_amplitude_error', 0);
 rows = repmat(template, 0, 1);
 end
@@ -620,7 +646,8 @@ plot(details.interpolation.t * 1e6, details.interpolation.linear / 1e3, 'r--')
 plot(details.interpolation.t * 1e6, details.interpolation.pchip / 1e3, 'b:')
 xlabel('Time (\mus)'); ylabel('Pressure (kPa)')
 legend('Analytic truth', 'Linear', 'PCHIP', 'Location', 'best'); grid on
-title('18 MHz, 200 kPa pressure interpolation')
+title(sprintf('18 MHz, 200 kPa pressure interpolation (stride %d)', ...
+    details.interpolation.stride))
 exportgraphics(figureHandle, outputPath, 'Resolution', 160); close(figureHandle)
 end
 

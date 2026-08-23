@@ -16,9 +16,9 @@ and replays pressure captured from a one-frame PROTEUS incident-field run.
 
 ```python
 %cd /content/PROTEUS
-!git fetch origin feature/gpu-bubble-solver
-!git checkout feature/gpu-bubble-solver
-!git pull --ff-only origin feature/gpu-bubble-solver
+!git fetch origin main
+!git checkout main
+!git pull --ff-only origin main
 !python3 evaluation/gpu_bubble_solver/run_colab_evaluation.py \
     --settings /content/PROTEUS/simulation-settings/my_simulation_settings.mat \
     --output-dir /content/PROTEUS/evaluation_results/gpu_bubble_solver
@@ -62,6 +62,12 @@ For local contract checks with MATLAB R2025a:
 /Applications/MATLAB_R2025a.app/bin/matlab -batch \
   "run('tests/matlab/test_gpu_bubble_solver_helpers.m')"
 ```
+
+`interpolation_metrics.csv` measures linear and PCHIP reconstruction of the
+driving pressure against the closed-form pulse at strides 1, 2, 4, and 6, so
+the error is reported at the spacing the solver actually integrates on rather
+than at the raw microbubble sampling rate. The overlay plot shows the stride
+the solver selected for the 18 MHz, 200 kPa case.
 
 This first evaluation does not define scientific pass/fail thresholds. The
 CPU result is labeled as an agreement reference rather than ground truth. Use

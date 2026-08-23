@@ -146,6 +146,22 @@ def test_colab_launcher_has_a_runnable_help_command():
     assert "--output-dir" in completed.stdout
 
 
+def test_interpolation_error_is_measured_at_the_strides_the_solver_uses():
+    source = (
+        ROOT
+        / "evaluation"
+        / "gpu_bubble_solver"
+        / "run_gpu_bubble_solver_evaluation.m"
+    ).read_text()
+
+    assert "interpolationStrides = [1, 2, 4, 6];" in source
+    assert "for strideValue = interpolationStrides" in source
+    assert "interpolate_strided_pressure(" in source
+    assert "coarseTime = pulse.t(1:stride:end);" in source
+    assert "row.stride = stride;" in source
+    assert "solverStride = gpuSolverInfo.stride;" in source
+
+
 def test_colab_launcher_runs_matlab_behavior_tests_before_evaluation():
     source = (
         ROOT / "evaluation" / "gpu_bubble_solver" / "run_colab_evaluation.py"
@@ -165,7 +181,7 @@ def test_readme_documents_the_single_colab_cell_and_evidence_boundary():
         ROOT / "evaluation" / "gpu_bubble_solver" / "README.md"
     ).read_text()
 
-    assert "feature/gpu-bubble-solver" in readme
+    assert "run_colab_evaluation.py" in readme
     assert "run_colab_evaluation.py" in readme
     assert "A100" in readme
     assert "does not define scientific pass/fail thresholds" in readme
