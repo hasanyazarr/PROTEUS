@@ -119,3 +119,12 @@ def test_gpu_pressure_interpolation_is_reported_by_the_solver():
         "runInfo.gpuPressureInterp = batchSolverInfo{1}.pressureInterp;"
         in massSource
     )
+
+
+def test_marmottant_liquid_surface_tension_is_read_per_bubble():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # The validator lets the Marmottant branch through without checking that
+    # the shells agree, so every shell field it reads has to be per-bubble.
+    assert "s_sigl = gpuArray(toPrecision(shell(1).sig_l));" not in source
+    assert source.count("toPrecision([shell.sig_l])") == 3

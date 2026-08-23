@@ -60,7 +60,7 @@ switch shell_model
     case 'Marmottant'
         s_chi  = gpuArray(toPrecision([shell.chi]));
         s_Rb   = gpuArray(toPrecision([shell.Rb]));
-        s_sigl = gpuArray(toPrecision(shell(1).sig_l));
+        s_sigl = gpuArray(toPrecision([shell.sig_l]));
     case 'SegersTable'
         Am_tbl  = gpuArray(toPrecision(shell(1).sig.GridVectors{1}(:)'));
         sig_tbl = gpuArray(toPrecision(shell(1).sig.Values(:)'));
