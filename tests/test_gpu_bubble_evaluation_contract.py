@@ -146,6 +146,22 @@ def test_colab_launcher_has_a_runnable_help_command():
     assert "--output-dir" in completed.stdout
 
 
+def test_preflight_rejects_the_attenuation_power_the_cuda_solver_refuses():
+    source = (
+        ROOT
+        / "evaluation"
+        / "gpu_bubble_solver"
+        / "run_gpu_bubble_solver_evaluation.m"
+    ).read_text()
+
+    assert "gpuBubbleEvaluation:IllegalAttenuationPower" in source
+    assert "double(attenuation.Medium.AttenuationB) == 1" in source
+    # The check has to precede the run, not trail the k-Wave precomputation.
+    assert source.index("IllegalAttenuationPower") < source.index(
+        "function [interpolationTable, solverTable, timingTable, details] ="
+    )
+
+
 def test_evaluation_normalizes_gui_settings_types_before_running():
     source = (
         ROOT

@@ -124,6 +124,16 @@ if ~exist(cudaBinary, 'file')
     error('gpuBubbleEvaluation:MissingKWaveBinary', ...
         'k-Wave CUDA binary not found: %s', cudaBinary)
 end
+% The CUDA solver rejects a power law exponent of exactly one, and this
+% evaluation always runs on 3DG. Fail here rather than after the k-Wave
+% precomputation has already been paid for.
+attenuation = load(settingsPath, 'Medium');
+if double(attenuation.Medium.AttenuationB) == 1
+    error('gpuBubbleEvaluation:IllegalAttenuationPower', ...
+        ['Medium.AttenuationB is exactly 1.0, which kspaceFirstOrder-CUDA ' ...
+         'rejects ("Illegal value of alpha_power"). Set it slightly off 1 ' ...
+         '(1.01 keeps the dispersion term disabled) before running.'])
+end
 settings = load(settingsPath, 'Geometry');
 geometryFolder = fullfile(PATHS.GeometriesPath, settings.Geometry.Folder);
 requiredGeometryFiles = {'vtu.mat', 'inlet.mat', 'GeometryProperties.mat'};

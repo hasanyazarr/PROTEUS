@@ -56,6 +56,12 @@ reports both of them alongside every timing row:
 | `Microbubble.GPUMaxStride` | `6` | Upper bound on the coarse output grid. `1` integrates every microbubble sample and disables spline interpolation. |
 | `Microbubble.GPURK4MaxPhaseStep` | `0.25` | Maximum phase advanced per RK4 substep [rad]. Substeps scale with the stride. |
 
+`Medium.AttenuationB` must not be exactly `1.0`: `kspaceFirstOrder-CUDA`
+refuses that power law exponent outright, and the evaluation always runs on
+`3DG`. Preflight rejects it before the k-Wave precomputation. `1.01` is the
+smallest change that clears the check and still keeps the dispersion term
+disabled, which is what `define_medium` does for exponents near 1 anyway.
+
 For local contract checks with MATLAB R2025a:
 
 ```bash
