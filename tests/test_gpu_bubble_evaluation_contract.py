@@ -146,6 +146,19 @@ def test_colab_launcher_has_a_runnable_help_command():
     assert "--output-dir" in completed.stdout
 
 
+def test_preflight_detects_the_blank_cuda_library_path():
+    source = (
+        ROOT
+        / "evaluation"
+        / "gpu_bubble_solver"
+        / "run_gpu_bubble_solver_evaluation.m"
+    ).read_text()
+
+    assert "gpuBubbleEvaluation:BlankCudaLibraryPath" in source
+    assert "export LD_LIBRARY_PATH=;" in source
+    assert "which('kspaceFirstOrder3DC')" in source
+
+
 def test_preflight_rejects_the_attenuation_power_the_cuda_solver_refuses():
     source = (
         ROOT
