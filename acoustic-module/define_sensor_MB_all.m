@@ -1,4 +1,4 @@
-function [sensor, MB_idx_all, max_mb] = define_sensor_MB_all(...
+function [sensor, MB_idx_all, max_mb, bubble_counts] = define_sensor_MB_all(...
     Grid, folder, Acquisition, N_sequence, Geometry)
 %DEFINE_SENSOR_MB_ALL loops through all the frames and sequence pulses that
 %need to be simulated and adds all corresponding microbubbles to the sensor
@@ -21,6 +21,7 @@ frame_end   = Acquisition.EndFrame;
 
 sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz);
 max_mb = 1;
+bubble_counts = zeros(frame_end - frame_start + 1, N_sequence);
 
 for frame = frame_start : frame_end
        
@@ -30,6 +31,8 @@ for frame = frame_start : frame_end
 
         % Put the microbubbles on the grid:
         [MB.points, ~, MB_idx, ~] = voxelize_media_points(MB.points, Grid);
+        frameIndex = frame - frame_start + 1;
+        bubble_counts(frameIndex, pulse_seq_idx) = size(MB.points, 1);
         
         if size(MB.points, 1) > max_mb
             max_mb = size(MB.points, 1);
