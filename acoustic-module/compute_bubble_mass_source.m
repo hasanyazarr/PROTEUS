@@ -6,10 +6,6 @@ function [mass_source, runInfo] = compute_bubble_mass_source(...
 %
 % Nathan Blanken, Guillaume Lajoinie, University of Twente, 2023
 
-disp('=================================================================')
-disp('ENTERING MICROBUBBLE MODULE')
-disp('=================================================================')
-
 % Number of microbubbles and signal length:
 [N_MB,N] = size(sensed_p);
 
@@ -81,9 +77,7 @@ else
 end
 
 % Resample signal at the sampling rate of the microbubble module:
-t_resamp1 = tic;
 sensed_p = sinc_interpolation(t_kwave, transpose(sensed_p), t_MB);
-fprintf('    [TIMING] sinc_interpolation (input):  %.2f s\n', toc(t_resamp1));
 
 % Filter settings:
 Filter.dt          = 1/fs_MB;
@@ -141,9 +135,6 @@ if useparfor
     
     parfor k = 1:Nbatch
 
-        disp(['Simulating microbubble batch ' ...
-            num2str(k) '/' num2str(Nbatch) ' ...'])
-
         mass_source_cell{k} = compute_mass_source(sensed_p_cell{k}, ...
             radii_cell{k}, Medium, Microbubble, liquid, gas, pulse, useGPU);
 
@@ -161,9 +152,6 @@ if useparfor
 else
     batchSolverInfo = cell(1, Nbatch);
     for k = 1:Nbatch
-
-        disp(['Simulating microbubble batch ' ...
-            num2str(k) '/' num2str(Nbatch) ' ...'])
 
         % Microbubble indices in the current batch:
         idx = get_batch_indices(k, N_MB, batchSize, radii);
@@ -201,11 +189,24 @@ else
         runInfo.gpuPressureInterp = batchSolverInfo{1}.pressureInterp;
     end
 end
-fprintf('    [TIMING] ODE batches total:            %.2f s\n', toc(t_ode));
+
+% One provenance banner per run instead of a solver line per batch per frame.
+if useGPU
+    run_log('banner', 'solver', ...
+        ['MB solver: GPU-RK4 | N_MB=%d (%d batch x %d) | N_out=%d\n' ...
+         '    stride=%d, n_sub=%d, precision=%s, pressure=%s'], ...
+        N_MB, Nbatch, batchSize, M, batchSolverInfo{1}.stride, ...
+        batchSolverInfo{1}.substeps, batchSolverInfo{1}.precision, ...
+        batchSolverInfo{1}.pressureInterp);
+else
+    run_log('banner', 'solver', ...
+        'MB solver: CPU ode45 | N_MB=%d (%d batch x %d) | N_out=%d', ...
+        N_MB, Nbatch, batchSize, M);
+end
+run_log('stage', 'ODE', toc(t_ode));
 
 % Filter unsupported frequencies before downsampling:
 % Batch FFT-domain low-pass filter (replaces per-bubble filterTimeSeries loop)
-t_filt = tic;
 f_max_filter = Filter.k_max * Filter.sound_speed / (2 * pi);
 filter_cutoff_f = f_max_filter;  % PPW=2 → cutoff = f_max
 tw_hz = Filter.TW * fs_MB;      % transition width in Hz
@@ -223,16 +224,10 @@ H(f_norm > 1) = 0;
 % Apply to all signals at once via FFT (zero-phase = magnitude-only in freq domain)
 MS_fft = fft(mass_source, [], 2);
 mass_source = real(ifft(MS_fft .* H, [], 2));
-fprintf('    [TIMING] filterTimeSeries_batch (%d MBs): %.2f s\n', N_MB, toc(t_filt));
 
 % Resample signals at the sampling rate of the acoustic module:
-t_resamp2 = tic;
 mass_source = sinc_interpolation(t_MB, transpose(mass_source), t_kwave);
-fprintf('    [TIMING] sinc_interpolation (output): %.2f s\n', toc(t_resamp2));
 
-disp('=================================================================')
-disp('EXITING MICROBUBBLE MODULE')
-disp('=================================================================')
 
 end
 

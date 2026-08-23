@@ -116,9 +116,6 @@ if idx_coarse(end) ~= int32(N_out)
 end
 N_coarse = length(idx_coarse);
 
-fprintf(['    [GPU-RK4] N_MB=%d, N_out=%d, stride=%d, N_coarse=%d, ' ...
-    'n_sub=%d, h=%.4g, precision=%s\n'], ...
-    N_MB, N_out, stride, N_coarse, n_sub, h, precision);
 
 %% Precompute RP equation constants as [1 x N_MB]
 C1 = P0 * T^2 / rho ./ R0.^2;

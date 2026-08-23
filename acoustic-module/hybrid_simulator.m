@@ -24,9 +24,6 @@ Grid.k_max = get_bubble_filter_kmax(Grid, Medium, true);
 
 for iter = 1:N_interactions
 
-    display(['Simulating bubble-bubble interaction, '...
-        'iteration ', num2str(iter)]);
-
     % create the time array
     t_end_2 = (max_trans_dist + max_dist  + 2*pulse_length) / ...
         Medium.SpeedOfSound; % [s]
@@ -38,7 +35,7 @@ for iter = 1:N_interactions
     t_mb = tic;
     mass_source = compute_bubble_mass_source(...
         sensed_p,  MB.radii, Grid, Medium, Microbubble, Transmit);
-    fprintf('  [TIMING] compute_bubble_mass_source (iter %d): %.2f s\n', iter, toc(t_mb));
+    run_log('stage', 'MB', toc(t_mb));
 
     source = [];
     sensor = [];
@@ -54,7 +51,7 @@ for iter = 1:N_interactions
     t_prop = tic;
     sensor_data = run_simulation_homogeneous(...
         run_param, Grid, medium, source, sensor);
-    fprintf('  [TIMING] run_simulation_homogeneous (iter %d): %.2f s\n', iter, toc(t_prop));
+    run_log('stage', 'prop', toc(t_prop));
 
     % Transfer data to CPU if on GPU:
     sensor_data.p = gather(sensor_data.p);
@@ -75,7 +72,7 @@ Grid.Nt = floor(t_end_3 / Grid.dt) + 1;
 t_mb = tic;
 mass_source = compute_bubble_mass_source(...
     sensed_p,  MB.radii, Grid, Medium, Microbubble, Transmit);
-fprintf('  [TIMING] compute_bubble_mass_source (receive): %.2f s\n', toc(t_mb));
+run_log('stage', 'MB', toc(t_mb));
 
 [i,j,k] = ind2sub([Grid.Nx,Grid.Ny,Grid.Nz],...
     sensor_mask_idx_trans);
@@ -93,7 +90,7 @@ run_param.gridded = true;
 t_prop = tic;
 sensor_data = run_simulation_homogeneous(...
     run_param, Grid, medium, source, sensor);
-fprintf('  [TIMING] run_simulation_homogeneous (receive): %.2f s\n', toc(t_prop));
+run_log('stage', 'prop', toc(t_prop));
 
 % Remove the microbubble module from the path
 rmpath(run_param.MicrobubblePath)

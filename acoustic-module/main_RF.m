@@ -160,7 +160,7 @@ end
 % Second & Third iterations (frames + MB part)
 
 % Timer for frames+MB part (after initial transmit):
-disp('=== Starting frames + MB part (timer started) ===');
+run_log('reset');
 t_frames_start = tic;
 tstart = tic;
 execution_times = zeros(1,Acquisition.NumberOfFrames);
@@ -230,7 +230,7 @@ if SimulationParameters.HybridSimulation
         end
 
         for frame = batch_start : batch_end
-            display(['frame ', num2str(frame)])
+            t_frame = tic;
 
             RF = cell(1,length(sequence));
             Frame = cell(1,length(sequence));
@@ -283,7 +283,7 @@ if SimulationParameters.HybridSimulation
                 t_rf = tic;
                 [RF{pulse_seq_idx}, run_param] = compute_RF_data(...
                     Transducer,sensor_data,sensor_weights,Grid,run_param);
-                fprintf('[TIMING] compute_RF_data: %.2f s\n', toc(t_rf));
+                run_log('stage', 'RF', toc(t_rf));
 
                 Frame{pulse_seq_idx} = MB;
 
@@ -297,6 +297,7 @@ if SimulationParameters.HybridSimulation
             save([savedir filesep file_name], 'RF', 'dt', 'Frame')
 
             execution_times(frame) = toc(tstart);
+            run_log('frame', frame, Acquisition.EndFrame, toc(t_frame));
 
         end
     end
@@ -333,7 +334,7 @@ else
     end
 
     for frame = Acquisition.StartFrame : Acquisition.EndFrame
-        display(['frame ', num2str(frame)])
+        t_frame = tic;
 
         RF = cell(1,length(sequence));
         Frame = cell(1,length(sequence));
@@ -383,7 +384,7 @@ else
             t_rf = tic;
             [RF{pulse_seq_idx}, run_param] = compute_RF_data(...
                 Transducer,sensor_data,sensor_weights,Grid,run_param);
-            fprintf('[TIMING] compute_RF_data: %.2f s\n', toc(t_rf));
+            run_log('stage', 'RF', toc(t_rf));
 
             Frame{pulse_seq_idx} = MB;
 
@@ -397,17 +398,14 @@ else
         save([savedir filesep file_name], 'RF', 'dt', 'Frame')
 
         execution_times(frame) = toc(tstart);
+        run_log('frame', frame, Acquisition.EndFrame, toc(t_frame));
 
     end
 end
 
 % Report time for frames + MB part
 frames_elapsed = toc(t_frames_start);
-disp('=== Frames + MB part complete ===');
-fprintf('  Total time:     %.2f s (%.2f min)\n', frames_elapsed, frames_elapsed / 60);
-fprintf('  Frames:         %d\n', num_frames_to_process);
-fprintf('  Microbubbles:   %d\n', Microbubble.Number);
-fprintf('  Per frame:      %.2f s\n', frames_elapsed / num_frames_to_process);
+run_log('summary', num_frames_to_process, frames_elapsed);
 
 % Save execution times for performance quantification if requested:
 if saveExecutionTimes == true

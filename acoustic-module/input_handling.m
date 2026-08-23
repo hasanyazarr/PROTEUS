@@ -54,7 +54,8 @@ if size(inputCell,2) > 3
     elseif isnumeric(inputCell{4}) && (floor(inputCell{4}) == inputCell{4})
         SimulationParameters.DeviceNumber = inputCell{4};
         gpuDevice(inputCell{4}+1);
-        disp(['Selected and reset GPU device ' num2str(inputCell{4}) '.']);
+        run_log('banner', 'gpudevice', ...
+            'k-Wave GPU device %s selected and reset', num2str(inputCell{4}));
         
     else
         error('varargin{3} must be an integer.')
