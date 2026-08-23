@@ -55,7 +55,7 @@ fprintf('  RF size: %s, range: [%.2e, %.2e], NaN: %d, all zero: %d\n', ...
 if all(rf1(:) == 0) || all(isnan(rf1(:)))
     warning('RF data in %s is all zeros or NaN. B-mode will be black.', flist(1).name);
     fprintf('  Possible causes: (1) Simulation (main_RF) produced no signal; (2) Pulsing scheme mismatch.\n');
-    fprintf('  Run diagnose_data.m for details, or re-run run_RF_on_Mac.m to regenerate RF.\n');
+    fprintf('  Re-run main_RF to regenerate the RF data.\n');
 end
 
 fprintf('=== Performing Delay-and-Sum Reconstruction ===\n');
