@@ -104,6 +104,9 @@ pulse.rk4MaxPhaseStep = resolve_gpu_rk4_max_phase_step(Microbubble);
 if isfield(Microbubble, 'GPUMaxStride')
     pulse.gpuMaxStride = Microbubble.GPUMaxStride;
 end
+if isfield(Microbubble, 'GPUPressureInterp')
+    pulse.gpuPressureInterp = Microbubble.GPUPressureInterp;
+end
 
 % Get the properties of the liquid, gas, and shell:
 [liquid, gas] = get_microbubble_material_properties(Medium, Microbubble);
@@ -195,6 +198,7 @@ else
             @(info) info.stride, batchSolverInfo);
         runInfo.rk4MaxPhaseStep = batchSolverInfo{1}.maxPhaseStep;
         runInfo.gpuPrecision = batchSolverInfo{1}.precision;
+        runInfo.gpuPressureInterp = batchSolverInfo{1}.pressureInterp;
     end
 end
 fprintf('    [TIMING] ODE batches total:            %.2f s\n', toc(t_ode));
@@ -253,6 +257,7 @@ runInfo.rk4ActualPhaseStepPerBatch = [];
 runInfo.stridePerBatch = [];
 runInfo.rk4MaxPhaseStep = NaN;
 runInfo.gpuPrecision = '';
+runInfo.gpuPressureInterp = '';
 end
 
 function precision = resolve_gpu_precision_setting(Microbubble)

@@ -13,6 +13,10 @@ function [response, eqparam, solverInfo] = calcBubbleResponse_GPU(liquid, ...
 %   pulse.rk4MaxPhaseStep  maximum phase advanced per RK4 substep [rad]
 %   pulse.gpuPrecision     'single' (default) or 'double'
 %   pulse.gpuMaxStride     upper bound on the output stride (1 disables it)
+%   pulse.gpuPressureInterp  'pchip' (default) or 'linear'. The CPU solver
+%                            evaluates a pchip interpolant of the transmit
+%                            pressure at every stage time, so pchip is what
+%                            reproduces it; 'linear' is kept for A/B runs.
 %
 % Nathan Blanken, University of Twente, 2023 (original CPU version)
 % GPU adaptation, 2026
@@ -21,6 +25,7 @@ N_MB = length(bubble);
 shell_model = validate_gpu_bubble_solver_inputs(pulse, shell);
 precision   = resolve_gpu_precision(pulse);
 strideLimit = resolve_gpu_max_stride(pulse);
+pressureInterp = resolve_gpu_pressure_interp(pulse);
 toPrecision = @(value) cast(value, precision);
 
 %% Equation parameters (CPU — same as original, fast)
@@ -98,6 +103,7 @@ dt_s = dt * toPrecision(stride);   % strided nondimensional step
     eqparam, pulse, maxPhaseStep, stride);
 solverInfo.stride = stride;
 solverInfo.precision = precision;
+solverInfo.pressureInterp = pressureInterp;
 h = dt_s / toPrecision(n_sub);
 
 %% Coarse output grid indices
@@ -129,6 +135,24 @@ two = toPrecision(2);
 P_coarse = P_gpu(:, idx_coarse);  % [N_MB x N_coarse] — single bulk GPU op
 dP_coarse = diff(P_coarse, 1, 2); % [N_MB x N_coarse-1]
 
+%% Cubic Hermite (pchip) coefficients for the pressure between coarse samples
+% Within a coarse interval the substeps need the pressure at intermediate
+% times. Sampling it linearly is the dominant source of disagreement with the
+% CPU reference, which evaluates a pchip interpolant instead. The shape-
+% preserving slopes are cheap to precompute once per interval and turn the
+% in-loop evaluation into three extra fused multiply-adds.
+if strcmp(pressureInterp, 'pchip')
+    t_coarse_dim = toPrecision(tq(idx_coarse));
+    slopes = pchip_slopes(t_coarse_dim, P_coarse);   % [N_MB x N_coarse]
+    % Scale by the interval width so the Hermite basis works on s in [0, 1].
+    dt_coarse = gpuArray(toPrecision(diff(t_coarse_dim(:)')));  % [1 x N_coarse-1]
+    Hm_lo = slopes(:, 1:end-1) .* dt_coarse;   % [N_MB x N_coarse-1]
+    Hm_hi = slopes(:, 2:end)   .* dt_coarse;
+else
+    Hm_lo = [];
+    Hm_hi = [];
+end
+
 %% Initialize state as [1 x N_MB]
 x  = gpuArray(zeros(1, N_MB, precision));
 xd = gpuArray(zeros(1, N_MB, precision));
@@ -146,18 +170,29 @@ intermediateNonPositive = gpuArray(false(1, N_MB));
 % n_sub pre-computed interpolation fractions (avoid repeated division)
 sub_fracs = toPrecision((0:n_sub) / n_sub);  % [0, 1/n_sub, ..., 1]
 
+% Interpolation weights for the three stage times of every substep. Each row
+% holds [start, midpoint, end]; the weights multiply the interval rise and,
+% for pchip, the two scaled endpoint slopes.
+stage_fracs = [sub_fracs(1:end-1)', ...
+    (sub_fracs(1:end-1)' + sub_fracs(2:end)') * toPrecision(0.5), ...
+    sub_fracs(2:end)'];                                  % [n_sub x 3]
+[W_rise, W_lo, W_hi] = hermite_stage_weights(stage_fracs, pressureInterp);
+
 for n = 1:(N_coarse-1)
     Pn = P_coarse(:, n)';    % [1 x N_MB] — precomputed, fast indexing
     dP = dP_coarse(:, n)';
+    if isempty(Hm_lo)
+        mLo = [];
+        mHi = [];
+    else
+        mLo = Hm_lo(:, n)';
+        mHi = Hm_hi(:, n)';
+    end
 
     for s = 1:n_sub
-        a0 = sub_fracs(s);
-        ah = (sub_fracs(s) + sub_fracs(s+1)) * toPrecision(0.5);
-        a1 = sub_fracs(s+1);
-
-        Ps = Pn + a0 * dP;
-        Pm = Pn + ah * dP;
-        Pe = Pn + a1 * dP;
+        Ps = interp_pressure(1);
+        Pm = interp_pressure(2);
+        Pe = interp_pressure(3);
 
         track_invalid_state(x);
         [k1x, k1v] = rp_rhs(x,          xd,          Ps);
@@ -208,6 +243,14 @@ for i = N_MB:-1:1
 end
 
 %% ===== Nested helpers (share the integration workspace) =====
+    function P = interp_pressure(stage)
+        % Pressure at one RK4 stage time inside the current coarse interval.
+        P = Pn + W_rise(s, stage) * dP;
+        if ~isempty(mLo)
+            P = P + W_lo(s, stage) * mLo + W_hi(s, stage) * mHi;
+        end
+    end
+
     function track_invalid_state(xi)
         intermediateNonPositive = intermediateNonPositive | 1 + xi <= 0;
     end
@@ -293,6 +336,22 @@ function [dx, dv] = rp_core(xi, xdi, Pi, sig, ...
         ) ...
     );
     dx = xdi;
+end
+
+function method = resolve_gpu_pressure_interp(pulse)
+% Resolve how the transmit pressure is sampled between coarse grid points.
+% The CPU reference uses a pchip interpolant, so that is the default here.
+
+method = 'pchip';
+if isfield(pulse, 'gpuPressureInterp')
+    method = pulse.gpuPressureInterp;
+end
+if ~(ischar(method) || isstring(method)) || ...
+        ~ismember(char(method), {'pchip', 'linear'})
+    error('calcBubbleResponse_GPU:InvalidPressureInterp', ...
+        'GPUPressureInterp must be ''pchip'' or ''linear''.');
+end
+method = char(method);
 end
 
 function precision = resolve_gpu_precision(pulse)

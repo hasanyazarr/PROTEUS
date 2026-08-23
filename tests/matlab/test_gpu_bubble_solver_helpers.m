@@ -120,6 +120,42 @@ assert(nargout('calcBubbleResponse_GPU') == 3);
 
 disp('GPU bubble solver helper tests passed.')
 
+%% Pchip slopes reproduce MATLAB's own pchip interpolant.
+x = [0, 0.7, 1.1, 2.6, 3.0, 4.4];
+Y = [sin(3*x); exp(-x); [0, 0, 1, 1, 1, 2]];
+m = pchip_slopes(x, Y);
+assert(isequal(size(m), size(Y)));
+for row = 1:size(Y, 1)
+    for k = 1:(numel(x) - 1)
+        H = x(k+1) - x(k);
+        sFrac = (0.05:0.05:0.95)';
+        [wRise, wLo, wHi] = hermite_stage_weights(sFrac, 'pchip');
+        ours = Y(row, k) + wRise*(Y(row, k+1) - Y(row, k)) ...
+            + wLo*(H*m(row, k)) + wHi*(H*m(row, k+1));
+        expected = pchip(x, Y(row, :), x(k) + sFrac*H);
+        assert(max(abs(ours - expected)) < 1e-12, ...
+            'Hermite reconstruction must match pchip (row %d, span %d).', ...
+            row, k);
+    end
+end
+
+%% Pchip slopes flatten at extrema and stay exact on two knots.
+mono = pchip_slopes([0, 1, 2], [0, 1, 0]);
+assert(mono(2) == 0);
+pair = pchip_slopes([0, 2], [1, 5]);
+assert(isequal(pair, [2, 2]));
+
+%% Hermite weights collapse to linear interpolation on request.
+fracs = [0; 0.25; 0.5; 1];
+[wRise, wLo, wHi] = hermite_stage_weights(fracs, 'linear');
+assert(isequal(wRise, fracs));
+assert(all(wLo == 0) && all(wHi == 0));
+
+% At the knots the pchip weights must reproduce the endpoint values exactly.
+[wRise, wLo, wHi] = hermite_stage_weights([0; 1], 'pchip');
+assert(isequal(wRise, [0; 1]));
+assert(all(wLo == 0) && all(wHi == 0));
+
 function shell = make_marmottant_shell()
 shell.model = 'Marmottant';
 shell.chi = 0.55;

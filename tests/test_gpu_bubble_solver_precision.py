@@ -88,3 +88,34 @@ def test_gpu_batch_size_supports_manual_override_and_legacy_settings():
     assert "Microbubble.GPUBatchSize" in source
     assert "gpuBatchSetting = Microbubble.BatchSize;" in source
     assert "batchSize = gpuBatchSetting;" in source
+
+
+def test_gpu_solver_samples_pressure_with_pchip_like_the_cpu_reference():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+    defaults = (ROOT / "GUIfunctions" / "reset_microbubble.m").read_text()
+
+    assert re.search(
+        r"pressureInterp\s*=\s*resolve_gpu_pressure_interp\(pulse\);", source
+    )
+    assert "slopes = pchip_slopes(t_coarse_dim, P_coarse);" in source
+    assert "hermite_stage_weights(stage_fracs, pressureInterp)" in source
+    assert "calcBubbleResponse_GPU:InvalidPressureInterp" in source
+    assert "{'pchip', 'linear'}" in source
+    # Linear sampling stays reachable so the two can be compared head to head.
+    assert re.search(
+        r"Microbubble\.GPUPressureInterp\s*=\s*'pchip';", defaults
+    )
+
+
+def test_gpu_pressure_interpolation_is_reported_by_the_solver():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+    massSource = (
+        ROOT / "acoustic-module" / "compute_bubble_mass_source.m"
+    ).read_text()
+
+    assert "solverInfo.pressureInterp = pressureInterp;" in source
+    assert "pulse.gpuPressureInterp = Microbubble.GPUPressureInterp;" in massSource
+    assert (
+        "runInfo.gpuPressureInterp = batchSolverInfo{1}.pressureInterp;"
+        in massSource
+    )
