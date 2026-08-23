@@ -97,7 +97,7 @@ def test_gpu_solver_samples_pressure_with_pchip_like_the_cpu_reference():
     assert re.search(
         r"pressureInterp\s*=\s*resolve_gpu_pressure_interp\(pulse\);", source
     )
-    assert "slopes = pchip_slopes(t_coarse_dim, P_coarse);" in source
+    assert "slopes = pchip_slopes(t_coarse_knots, P_coarse);" in source
     assert "hermite_stage_weights(stage_fracs, pressureInterp)" in source
     assert "calcBubbleResponse_GPU:InvalidPressureInterp" in source
     assert "{'pchip', 'linear'}" in source
@@ -139,3 +139,31 @@ def test_rk4_step_follows_each_coarse_interval_width():
     assert "hn  = h_interval(n);" in source
     for stale in ("x + h2*k1x", "xd+h2*k1v", "x + h*k3x", "h6 * (k1x"):
         assert stale not in source
+
+
+def test_coarse_grid_knots_stay_in_double_precision():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # A single-precision time value resolves the sample spacing of a pulse
+    # tens of microseconds long to about three digits, which would land in the
+    # interval widths and from there in the pchip slopes.
+    assert "t_coarse_knots = reshape(double(tq(idx_coarse)), 1, []);" in source
+    assert "dt_coarse = gpuArray(toPrecision(diff(t_coarse_knots)));" in source
+    assert "toPrecision(tq(idx_coarse))" not in source
+    # The spline back-interpolation reads the same double knots.
+    assert "tc = t_coarse_knots;" in source
+    assert "tf = reshape(double(tq), 1, []);" in source
+
+
+def test_stage_pressure_is_evaluated_inside_the_rhs_kernel():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # Evaluating the Hermite form outside arrayfun cost several extra kernel
+    # launches per RK4 stage, in a loop that is already launch-bound.
+    assert "function P = interp_pressure(stage)" not in source
+    assert source.count("Pi = Pn + wRise*dP + wLo*mLo + wHi*mHi;") == 2
+    assert "function [dx, dv] = rp_rhs(xi, xdi, stage)" in source
+    for kernel in ("@rp_marmottant", "@rp_core"):
+        assert f"arrayfun({kernel}, xi, xdi, ...\n                    Pn, dP, mLo, mHi, wRise, wLo, wHi" in source
+    # The stage index, not a precomputed pressure array, reaches the RHS.
+    assert "[k1x, k1v] = rp_rhs(x,          xd,          1);" in source

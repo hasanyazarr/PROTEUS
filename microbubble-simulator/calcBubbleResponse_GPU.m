@@ -145,16 +145,22 @@ dP_coarse = diff(P_coarse, 1, 2); % [N_MB x N_coarse-1]
 % CPU reference, which evaluates a pchip interpolant instead. The shape-
 % preserving slopes are cheap to precompute once per interval and turn the
 % in-loop evaluation into three extra fused multiply-adds.
+% The knots stay in double: at a pulse time of tens of microseconds a
+% single-precision time value resolves the sample spacing to only about
+% three digits, which would carry straight into the slopes.
+t_coarse_knots = reshape(double(tq(idx_coarse)), 1, []);
 if strcmp(pressureInterp, 'pchip')
-    t_coarse_dim = toPrecision(tq(idx_coarse));
-    slopes = pchip_slopes(t_coarse_dim, P_coarse);   % [N_MB x N_coarse]
+    slopes = pchip_slopes(t_coarse_knots, P_coarse);   % [N_MB x N_coarse]
     % Scale by the interval width so the Hermite basis works on s in [0, 1].
-    dt_coarse = gpuArray(toPrecision(diff(t_coarse_dim(:)')));  % [1 x N_coarse-1]
+    dt_coarse = gpuArray(toPrecision(diff(t_coarse_knots)));  % [1 x N_coarse-1]
     Hm_lo = slopes(:, 1:end-1) .* dt_coarse;   % [N_MB x N_coarse-1]
     Hm_hi = slopes(:, 2:end)   .* dt_coarse;
 else
     Hm_lo = [];
     Hm_hi = [];
+    % The kernel always reads two slope arrays; linear sampling weights them
+    % with zero, so one shared zero row keeps the signature uniform.
+    zeroSlope = gpuArray(zeros(1, N_MB, precision));
 end
 
 %% Initialize state as [1 x N_MB]
@@ -189,29 +195,27 @@ for n = 1:(N_coarse-1)
     hn2 = toPrecision(0.5) * hn;
     hn6 = hn / toPrecision(6);
     if isempty(Hm_lo)
-        mLo = [];
-        mHi = [];
+        mLo = zeroSlope;
+        mHi = zeroSlope;
     else
         mLo = Hm_lo(:, n)';
         mHi = Hm_hi(:, n)';
     end
 
     for s = 1:n_sub
-        Ps = interp_pressure(1);
-        Pm = interp_pressure(2);
-        Pe = interp_pressure(3);
-
+        % The stage pressures are evaluated inside the RHS kernel, so the
+        % interpolation costs fused arithmetic instead of its own launches.
         track_invalid_state(x);
-        [k1x, k1v] = rp_rhs(x,          xd,          Ps);
+        [k1x, k1v] = rp_rhs(x,          xd,          1);
         k2StateX = x + hn2*k1x;
         track_invalid_state(k2StateX);
-        [k2x, k2v] = rp_rhs(k2StateX,   xd+hn2*k1v,  Pm);
+        [k2x, k2v] = rp_rhs(k2StateX,   xd+hn2*k1v,  2);
         k3StateX = x + hn2*k2x;
         track_invalid_state(k3StateX);
-        [k3x, k3v] = rp_rhs(k3StateX,   xd+hn2*k2v,  Pm);
+        [k3x, k3v] = rp_rhs(k3StateX,   xd+hn2*k2v,  2);
         k4StateX = x + hn*k3x;
         track_invalid_state(k4StateX);
-        [k4x, k4v] = rp_rhs(k4StateX,   xd+hn*k3v,   Pe);
+        [k4x, k4v] = rp_rhs(k4StateX,   xd+hn*k3v,   3);
 
         x  = x  + hn6 * (k1x + two*k2x + two*k3x + k4x);
         xd = xd + hn6 * (k1v + two*k2v + two*k3v + k4v);
@@ -222,13 +226,11 @@ for n = 1:(N_coarse-1)
 end
 
 %% Interpolate coarse results back to fine grid
-t_coarse = gpuArray(toPrecision(tq(idx_coarse)));
-t_fine   = gpuArray(toPrecision(tq));
-
 if stride > 1
-    % Gather to CPU for spline (avoids GPU NaN limitation), then send back
-    tc = gather(t_coarse);
-    tf = gather(t_fine);
+    % Spline on the CPU (avoids the GPU NaN limitation), knots in double so
+    % the coarse grid is not quantised by the single-precision time values.
+    tc = t_coarse_knots;
+    tf = reshape(double(tq), 1, []);
     X_out  = interp1(tc, gather(X_coarse),  tf, 'spline');
     Xd_out = interp1(tc, gather(Xd_coarse), tf, 'spline');
 else
@@ -250,30 +252,29 @@ for i = N_MB:-1:1
 end
 
 %% ===== Nested helpers (share the integration workspace) =====
-    function P = interp_pressure(stage)
-        % Pressure at one RK4 stage time inside the current coarse interval.
-        P = Pn + W_rise(s, stage) * dP;
-        if ~isempty(mLo)
-            P = P + W_lo(s, stage) * mLo + W_hi(s, stage) * mHi;
-        end
-    end
-
     function track_invalid_state(xi)
         intermediateNonPositive = intermediateNonPositive | 1 + xi <= 0;
     end
 
-    function [dx, dv] = rp_rhs(xi, xdi, Pi)
+    function [dx, dv] = rp_rhs(xi, xdi, stage)
+        % STAGE selects the RK4 stage time within the current substep; its
+        % Hermite weights turn the interval endpoints into the stage pressure.
+        wRise = W_rise(s, stage);
+        wLo   = W_lo(s, stage);
+        wHi   = W_hi(s, stage);
         switch shell_model
             case 'Marmottant'
-                % Fully fused: surface tension + RP in one kernel launch
-                [dx, dv] = arrayfun(@rp_marmottant, xi, xdi, Pi, ...
+                % Fully fused: pressure + surface tension + RP in one kernel
+                [dx, dv] = arrayfun(@rp_marmottant, xi, xdi, ...
+                    Pn, dP, mLo, mHi, wRise, wLo, wHi, ...
                     R0, kap, C1, C2, C3, C4, C5, C6, invP0, ...
                     s_chi, s_Rb, s_sigl);
 
             otherwise
-                % Compute surface tension separately, then fuse RP
+                % Compute surface tension separately, then fuse pressure + RP
                 sig = compute_sig(xi);
-                [dx, dv] = arrayfun(@rp_core, xi, xdi, Pi, sig, ...
+                [dx, dv] = arrayfun(@rp_core, xi, xdi, ...
+                    Pn, dP, mLo, mHi, wRise, wLo, wHi, sig, ...
                     kap, C1, C2, C3, C4, C5, C6, invP0);
         end
     end
@@ -302,10 +303,12 @@ end
 % All literals stay untyped so the kernels run at the precision of their
 % inputs.
 
-function [dx, dv] = rp_marmottant(xi, xdi, Pi, ...
+function [dx, dv] = rp_marmottant(xi, xdi, ...
+        Pn, dP, mLo, mHi, wRise, wLo, wHi, ...
         R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
         chi, Rb, sigl)
-    % Fused Marmottant surface tension + Rayleigh-Plesset RHS
+    % Fused stage pressure + Marmottant surface tension + Rayleigh-Plesset RHS
+    Pi = Pn + wRise*dP + wLo*mLo + wHi*mHi;
     Ri = R0i * (1 + xi);
     sig_raw = chi * (Ri * Ri / (Rb * Rb) - 1);
     sig = min(max(sig_raw, 0), sigl);
@@ -326,9 +329,11 @@ function [dx, dv] = rp_marmottant(xi, xdi, Pi, ...
     dx = xdi;
 end
 
-function [dx, dv] = rp_core(xi, xdi, Pi, sig, ...
+function [dx, dv] = rp_core(xi, xdi, ...
+        Pn, dP, mLo, mHi, wRise, wLo, wHi, sig, ...
         kapi, c1, c2, c3, c4, c5, c6, invP0)
     % Rayleigh-Plesset RHS with pre-computed surface tension
+    Pi = Pn + wRise*dP + wLo*mLo + wHi*mHi;
     opx  = max(1 + xi, 1e-6);
     iopx = 1 / opx;
     dv = iopx * ( ...
