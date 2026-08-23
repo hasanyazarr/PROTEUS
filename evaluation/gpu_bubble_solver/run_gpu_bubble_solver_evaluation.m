@@ -23,7 +23,7 @@ addpath(PATHS.GUIfunctions)
 addpath(genpath(PATHS.kWavePath))
 preflight(settingsPath, PATHS);
 gpuDevice(1);
-phaseSettings = load(settingsPath, 'Microbubble');
+phaseSettings = normalize_settings_types(load(settingsPath, 'Microbubble'));
 maxPhaseStep = resolve_gpu_rk4_max_phase_step(phaseSettings.Microbubble);
 gpuPrecision = 'single';
 if isfield(phaseSettings.Microbubble, 'GPUPrecision')
@@ -393,7 +393,9 @@ end
 function [capturePath, temporarySettingsPath] = ...
         capture_real_pressure(settingsPath, outputDir, PATHS, seed, ...
         maxPhaseStep, gpuPrecision, gpuMaxStride)
-settings = load(settingsPath);
+% The GUI saves numeric fields as integer or single classes, which the
+% streamline and acoustic modules cannot mix with double time arrays.
+settings = normalize_settings_types(load(settingsPath));
 requiredVariables = {'Acquisition', 'Geometry', 'Medium', 'Microbubble', ...
     'SimulationParameters', 'Transducer', 'Transmit'};
 for i = 1:numel(requiredVariables)

@@ -146,6 +146,19 @@ def test_colab_launcher_has_a_runnable_help_command():
     assert "--output-dir" in completed.stdout
 
 
+def test_evaluation_normalizes_gui_settings_types_before_running():
+    source = (
+        ROOT
+        / "evaluation"
+        / "gpu_bubble_solver"
+        / "run_gpu_bubble_solver_evaluation.m"
+    ).read_text()
+
+    assert "normalize_settings_types(load(settingsPath))" in source
+    assert "normalize_settings_types(load(settingsPath, 'Microbubble'))" in source
+    assert "settings = load(settingsPath);" not in source
+
+
 def test_interpolation_error_is_measured_at_the_strides_the_solver_uses():
     source = (
         ROOT
