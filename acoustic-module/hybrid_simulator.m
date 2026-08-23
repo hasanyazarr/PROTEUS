@@ -20,7 +20,7 @@ Nt = floor(t_end_1 / Grid.dt) + 1;
 sensed_p = sensed_p_1iter;
 
 % k_max only to be used in k-Wave function filterTimeSeries:
-Grid.k_max = pi/Grid.dt/Medium.SpeedOfSoundMinimum;
+Grid.k_max = get_bubble_filter_kmax(Grid, Medium, true);
 
 for iter = 1:N_interactions
 

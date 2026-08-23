@@ -1,96 +1,104 @@
-function [response, eqparam] = calcBubbleResponse_GPU(liquid, gas, ...
-    shell, bubble, pulse)
+function [response, eqparam, solverInfo] = calcBubbleResponse_GPU(liquid, ...
+    gas, shell, bubble, pulse)
 % GPU-accelerated Rayleigh-Plesset solver using fixed-step RK4.
-% All microbubbles are solved in parallel on GPU with arrayfun kernel fusion
-% and single-precision arithmetic for maximum throughput.
+% All microbubbles are solved in parallel on GPU with arrayfun kernel fusion.
 % Drop-in replacement for calcBubbleResponse.m
 %
 % Optimizations:
 %   - arrayfun kernel fusion (1 GPU kernel per RHS eval instead of ~20)
-%   - single precision (2x bandwidth, 2x compute on A100)
+%   - configurable precision (single by default: 2x bandwidth on A100)
 %   - strided integration (fewer loop iterations, interpolate output)
+%
+% Accuracy controls (all optional, read from the pulse struct):
+%   pulse.rk4MaxPhaseStep  maximum phase advanced per RK4 substep [rad]
+%   pulse.gpuPrecision     'single' (default) or 'double'
+%   pulse.gpuMaxStride     upper bound on the output stride (1 disables it)
 %
 % Nathan Blanken, University of Twente, 2023 (original CPU version)
 % GPU adaptation, 2026
 
 N_MB = length(bubble);
+shell_model = validate_gpu_bubble_solver_inputs(pulse, shell);
+precision   = resolve_gpu_precision(pulse);
+strideLimit = resolve_gpu_max_stride(pulse);
+toPrecision = @(value) cast(value, precision);
 
 %% Equation parameters (CPU — same as original, fast)
 for i = N_MB:-1:1
     eqparam(i) = getEqParam(liquid, gas, shell(i), bubble(i), pulse);
 end
 
-%% Transfer per-bubble parameters to GPU as single [1 x N_MB]
-R0   = gpuArray(single([bubble.R0]));
-kap  = gpuArray(single([eqparam.kappa]));
-nu   = gpuArray(single([eqparam.nu]));
-Ks   = gpuArray(single([shell.Ks]));
-sig0 = gpuArray(single([shell.sig_0]));
+%% Transfer per-bubble parameters to GPU as [1 x N_MB]
+R0   = gpuArray(toPrecision([bubble.R0]));
+kap  = gpuArray(toPrecision([eqparam.kappa]));
+nu   = gpuArray(toPrecision([eqparam.nu]));
+Ks   = gpuArray(toPrecision([shell.Ks]));
+sig0 = gpuArray(toPrecision([shell.sig_0]));
 
-P0  = single(liquid.P0);
-rho = single(liquid.rho);
-c_l = single(liquid.c);
+P0  = toPrecision(liquid.P0);
+rho = toPrecision(liquid.rho);
+c_l = toPrecision(liquid.c);
 
 %% Nondimensionalization (compute in double for accuracy, then cast)
-T = single(median(sqrt(double(rho) * double(gather(R0)).^2 / double(P0))));
+T = toPrecision(median(sqrt(double(rho) * double(gather(R0)).^2 / double(P0))));
 tq = pulse.tq;
 N_out = length(tq);
-dt_dim = single(tq(2) - tq(1));
+dt_dim = toPrecision(tq(2) - tq(1));
 dt = dt_dim / T;
-fs_MB = single(1) / dt_dim;
+fs_MB = toPrecision(1) / dt_dim;
 
-%% Pressure on GPU as single [N_MB x N_out]
-P_gpu = gpuArray(single(pulse.p));
+%% Pressure on GPU as [N_MB x N_out]
+P_gpu = gpuArray(toPrecision(pulse.p));
 
 %% Surface tension model setup
-shell_model = shell(1).model;
 switch shell_model
     case 'Marmottant'
-        s_chi  = gpuArray(single([shell.chi]));
-        s_Rb   = gpuArray(single([shell.Rb]));
-        s_sigl = gpuArray(single(shell(1).sig_l));
+        s_chi  = gpuArray(toPrecision([shell.chi]));
+        s_Rb   = gpuArray(toPrecision([shell.Rb]));
+        s_sigl = gpuArray(toPrecision(shell(1).sig_l));
     case 'SegersTable'
-        Am_tbl  = gpuArray(single(shell(1).sig.GridVectors{1}(:)'));
-        sig_tbl = gpuArray(single(shell(1).sig.Values(:)'));
-        s_AN    = gpuArray(single([shell.A_N]));
-        s_Am1   = gpuArray(single([shell.A_m1]));
-        s_Am2   = gpuArray(single([shell.A_m2]));
-        s_sigl  = gpuArray(single([shell.sig_l]));
+        Am_tbl  = gpuArray(toPrecision(shell(1).sig.GridVectors{1}(:)'));
+        sig_tbl = gpuArray(toPrecision(shell(1).sig.Values(:)'));
+        s_AN    = gpuArray(toPrecision([shell.A_N]));
+        s_Am1   = gpuArray(toPrecision([shell.A_m1]));
+        s_Am2   = gpuArray(toPrecision([shell.A_m2]));
+        s_sigl  = gpuArray(toPrecision([shell.sig_l]));
     case 'Segers'
-        s_coeff = single(shell(1).coeff);
-        s_AN    = gpuArray(single([shell.A_N]));
-        s_Am1   = gpuArray(single([shell.A_m1]));
-        s_Am2   = gpuArray(single([shell.A_m2]));
-        s_sigl  = gpuArray(single([shell.sig_l]));
+        s_coeff = toPrecision(shell(1).coeff);
+        s_AN    = gpuArray(toPrecision([shell.A_N]));
+        s_Am1   = gpuArray(toPrecision([shell.A_m1]));
+        s_Am2   = gpuArray(toPrecision([shell.A_m2]));
+        s_sigl  = gpuArray(toPrecision([shell.sig_l]));
 end
 
-%% Stability: sub-steps per output step (includes C1 for safety)
-C1_pre = P0 * T^2 / rho ./ R0.^2;
-omega_nd = sqrt(single(3) * max(gather(kap .* C1_pre)));
-dt_crit  = single(2.0) / omega_nd;
+%% Fastest timescale that the integrator has to resolve
+maxPhaseStep = resolve_gpu_rk4_max_phase_step(pulse);
+[~, unstridedInfo] = calculate_gpu_rk4_substeps(eqparam, pulse, maxPhaseStep);
+maxAngularFrequency = unstridedInfo.maxAngularFrequency;
 
 %% Integration stride: reduce loop iterations by taking larger steps
-% The pressure signal is band-limited by the transmit frequency.
-% At 250 MHz sampling with ~3 MHz center freq, we have ~83 samples/period.
-% The input pressure is ~single-frequency; harmonics are generated by the
-% nonlinear ODE internally, so we only need to resolve the fundamental
-% (and 2nd harmonic for accuracy) in the pressure interpolation.
-f_center = single(pulse.f);
-max_harmonic = single(2);   % input pressure content up to 2nd harmonic
+% The pressure signal is band-limited by the transmit frequency, so the
+% output grid may be coarser than the microbubble sampling rate. Substeps
+% (below) keep the integration itself accurate at the strided step.
+f_center = toPrecision(pulse.f);
+max_harmonic = toPrecision(2);   % input pressure content up to 2nd harmonic
 f_max = f_center * max_harmonic;
 % Ensure at least 4 samples per period at highest input harmonic after striding
-stride = max(1, floor(fs_MB / (single(4) * f_max)));
-% Also limit by stability: strided step must not exceed dt_crit (with 2x safety margin)
-stride = min(stride, max(1, floor(single(0.5) * dt_crit / dt)));
-% Cap at 6: safe for 2nd harmonic sampling and nonlinear stability
-stride = min(stride, 6);
+stride = max(1, floor(fs_MB / (toPrecision(4) * f_max)));
+% Also limit by stability: strided step must not exceed the critical step
+dt_crit_dim = toPrecision(2) / toPrecision(maxAngularFrequency);
+stride = min(stride, max(1, floor(toPrecision(0.5) * dt_crit_dim / dt_dim)));
+% Cap at the configured maximum (6 by default)
+stride = double(min(stride, strideLimit));
 
-dt_s = dt * single(stride);   % strided nondimensional step
+dt_s = dt * toPrecision(stride);   % strided nondimensional step
 
-% Sub-steps within each strided step for stability
-% Use 1.5x safety factor: nonlinear oscillations can exceed linear dt_crit
-n_sub = max(1, ceil(single(1.5) * dt_s / dt_crit));
-h     = dt_s / single(n_sub);
+%% Sub-steps within each strided step, bounded by the maximum phase step
+[n_sub, solverInfo] = calculate_gpu_rk4_substeps(...
+    eqparam, pulse, maxPhaseStep, stride);
+solverInfo.stride = stride;
+solverInfo.precision = precision;
+h = dt_s / toPrecision(n_sub);
 
 %% Coarse output grid indices
 idx_coarse = int32(1:stride:N_out);
@@ -99,39 +107,44 @@ if idx_coarse(end) ~= int32(N_out)
 end
 N_coarse = length(idx_coarse);
 
-fprintf('    [GPU-RK4] N_MB=%d, N_out=%d, stride=%d, N_coarse=%d, n_sub=%d, h=%.4g\n', ...
-    N_MB, N_out, stride, N_coarse, n_sub, h);
+fprintf(['    [GPU-RK4] N_MB=%d, N_out=%d, stride=%d, N_coarse=%d, ' ...
+    'n_sub=%d, h=%.4g, precision=%s\n'], ...
+    N_MB, N_out, stride, N_coarse, n_sub, h, precision);
 
-%% Precompute RP equation constants as single [1 x N_MB]
-C1 = C1_pre;
-C2 = gpuArray(single(1) + single(2)*sig0./(R0*P0));
-C3 = gpuArray(single(3)*kap.*R0 / (c_l*T));
-C4 = gpuArray(single(2)./(R0*P0));
-C5 = gpuArray(single(4)*nu / (P0*T));
-C6 = gpuArray(single(4)*Ks./(P0*R0*T));
-invP0 = single(1) / P0;
+%% Precompute RP equation constants as [1 x N_MB]
+C1 = P0 * T^2 / rho ./ R0.^2;
+C2 = gpuArray(toPrecision(1) + toPrecision(2)*sig0./(R0*P0));
+C3 = gpuArray(toPrecision(3)*kap.*R0 / (c_l*T));
+C4 = gpuArray(toPrecision(2)./(R0*P0));
+C5 = gpuArray(toPrecision(4)*nu / (P0*T));
+C6 = gpuArray(toPrecision(4)*Ks./(P0*R0*T));
+invP0 = toPrecision(1) / P0;
 
 %% Precompute step-size fractions
-h2 = single(0.5) * h;
-h6 = h / single(6);
-two = single(2);
+h2 = toPrecision(0.5) * h;
+h6 = h / toPrecision(6);
+two = toPrecision(2);
 
-%% Precompute pressure at coarse grid points to avoid per-iteration GPU indexing
-% P_gpu is [N_MB x N_out], extract columns at coarse indices all at once
+%% Precompute pressure at coarse grid points to avoid per-iteration indexing
 P_coarse = P_gpu(:, idx_coarse);  % [N_MB x N_coarse] — single bulk GPU op
 dP_coarse = diff(P_coarse, 1, 2); % [N_MB x N_coarse-1]
 
-%% Initialize state as single [1 x N_MB]
-x  = gpuArray(zeros(1, N_MB, 'single'));
-xd = gpuArray(zeros(1, N_MB, 'single'));
+%% Initialize state as [1 x N_MB]
+x  = gpuArray(zeros(1, N_MB, precision));
+xd = gpuArray(zeros(1, N_MB, precision));
 
-%% Preallocate coarse output as single [N_coarse x N_MB]
-X_coarse  = gpuArray(zeros(N_coarse, N_MB, 'single'));
-Xd_coarse = gpuArray(zeros(N_coarse, N_MB, 'single'));
+%% Preallocate coarse output as [N_coarse x N_MB]
+X_coarse  = gpuArray(zeros(N_coarse, N_MB, precision));
+Xd_coarse = gpuArray(zeros(N_coarse, N_MB, precision));
+
+% The fused kernels clamp 1+x away from zero to stay differentiable. Record
+% where that clamp would have been hit so the run can be rejected instead of
+% silently continuing from a collapsed bubble.
+intermediateNonPositive = gpuArray(false(1, N_MB));
 
 %% RK4 integration on coarse grid
 % n_sub pre-computed interpolation fractions (avoid repeated division)
-sub_fracs = single((0:n_sub) / n_sub);  % [0, 1/n_sub, ..., 1]
+sub_fracs = toPrecision((0:n_sub) / n_sub);  % [0, 1/n_sub, ..., 1]
 
 for n = 1:(N_coarse-1)
     Pn = P_coarse(:, n)';    % [1 x N_MB] — precomputed, fast indexing
@@ -139,17 +152,24 @@ for n = 1:(N_coarse-1)
 
     for s = 1:n_sub
         a0 = sub_fracs(s);
-        ah = (sub_fracs(s) + sub_fracs(s+1)) * single(0.5);
+        ah = (sub_fracs(s) + sub_fracs(s+1)) * toPrecision(0.5);
         a1 = sub_fracs(s+1);
 
         Ps = Pn + a0 * dP;
         Pm = Pn + ah * dP;
         Pe = Pn + a1 * dP;
 
+        track_invalid_state(x);
         [k1x, k1v] = rp_rhs(x,          xd,          Ps);
-        [k2x, k2v] = rp_rhs(x+h2*k1x,   xd+h2*k1v,   Pm);
-        [k3x, k3v] = rp_rhs(x+h2*k2x,   xd+h2*k2v,   Pm);
-        [k4x, k4v] = rp_rhs(x+h*k3x,    xd+h*k3v,    Pe);
+        k2StateX = x + h2*k1x;
+        track_invalid_state(k2StateX);
+        [k2x, k2v] = rp_rhs(k2StateX,   xd+h2*k1v,   Pm);
+        k3StateX = x + h2*k2x;
+        track_invalid_state(k3StateX);
+        [k3x, k3v] = rp_rhs(k3StateX,   xd+h2*k2v,   Pm);
+        k4StateX = x + h*k3x;
+        track_invalid_state(k4StateX);
+        [k4x, k4v] = rp_rhs(k4StateX,   xd+h*k3v,    Pe);
 
         x  = x  + h6 * (k1x + two*k2x + two*k3x + k4x);
         xd = xd + h6 * (k1v + two*k2v + two*k3v + k4v);
@@ -159,9 +179,9 @@ for n = 1:(N_coarse-1)
     Xd_coarse(n+1,:) = xd;
 end
 
-%% Interpolate coarse results back to fine grid on GPU
-t_coarse = gpuArray(single(tq(idx_coarse)));
-t_fine   = gpuArray(single(tq));
+%% Interpolate coarse results back to fine grid
+t_coarse = gpuArray(toPrecision(tq(idx_coarse)));
+t_fine   = gpuArray(toPrecision(tq));
 
 if stride > 1
     % Gather to CPU for spline (avoids GPU NaN limitation), then send back
@@ -179,13 +199,19 @@ X_out  = double(gather(X_out));
 Xd_out = double(gather(Xd_out));
 t_out  = tq(:);
 
+validate_gpu_bubble_states(X_out, Xd_out, gather(intermediateNonPositive));
+
 for i = N_MB:-1:1
     response(i).R    = bubble(i).R0 * (1 + X_out(:,i));
     response(i).Rdot = bubble(i).R0 * Xd_out(:,i) / double(T);
     response(i).t    = t_out;
 end
 
-%% ===== Nested RHS: arrayfun-fused kernels =====
+%% ===== Nested helpers (share the integration workspace) =====
+    function track_invalid_state(xi)
+        intermediateNonPositive = intermediateNonPositive | 1 + xi <= 0;
+    end
+
     function [dx, dv] = rp_rhs(xi, xdi, Pi)
         switch shell_model
             case 'Marmottant'
@@ -203,18 +229,18 @@ end
     end
 
     function sig = compute_sig(xi)
-        Ri = R0 .* (single(1) + xi);
+        Ri = R0 .* (1 + xi);
         switch shell_model
             case 'SegersTable'
-                Am = single(4*pi)*Ri.^2 ./ s_AN;
+                Am = toPrecision(4*pi)*Ri.^2 ./ s_AN;
                 Am_c = min(max(Am, Am_tbl(1)), Am_tbl(end));
                 sig = interp1(Am_tbl, sig_tbl, Am_c, 'linear');
-                sig(Am <= s_Am1) = single(0);
+                sig(Am <= s_Am1) = 0;
                 sig(Am >= s_Am2) = s_sigl(Am >= s_Am2);
             case 'Segers'
-                Am = single(4*pi)*Ri.^2 ./ s_AN;
+                Am = toPrecision(4*pi)*Ri.^2 ./ s_AN;
                 sig = polyval(s_coeff, Am);
-                sig(Am < s_Am1) = single(0);
+                sig(Am < s_Am1) = 0;
                 sig(Am > s_Am2) = s_sigl(Am > s_Am2);
         end
     end
@@ -223,6 +249,8 @@ end
 
 %% ===== GPU arrayfun kernel functions =====
 % These are local functions (not nested) so MATLAB can compile them for GPU.
+% All literals stay untyped so the kernels run at the precision of their
+% inputs.
 
 function [dx, dv] = rp_marmottant(xi, xdi, Pi, ...
         R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
@@ -230,9 +258,9 @@ function [dx, dv] = rp_marmottant(xi, xdi, Pi, ...
     % Fused Marmottant surface tension + Rayleigh-Plesset RHS
     Ri = R0i * (1 + xi);
     sig_raw = chi * (Ri * Ri / (Rb * Rb) - 1);
-    sig = min(max(sig_raw, single(0)), sigl);
+    sig = min(max(sig_raw, 0), sigl);
 
-    opx  = max(1 + xi, single(1e-6));
+    opx  = max(1 + xi, 1e-6);
     iopx = 1 / opx;
     dv = iopx * ( ...
         -1.5 * xdi * xdi ...
@@ -251,7 +279,7 @@ end
 function [dx, dv] = rp_core(xi, xdi, Pi, sig, ...
         kapi, c1, c2, c3, c4, c5, c6, invP0)
     % Rayleigh-Plesset RHS with pre-computed surface tension
-    opx  = max(1 + xi, single(1e-6));
+    opx  = max(1 + xi, 1e-6);
     iopx = 1 / opx;
     dv = iopx * ( ...
         -1.5 * xdi * xdi ...
@@ -265,4 +293,36 @@ function [dx, dv] = rp_core(xi, xdi, Pi, sig, ...
         ) ...
     );
     dx = xdi;
+end
+
+function precision = resolve_gpu_precision(pulse)
+% Resolve the floating-point class used for the GPU integration.
+
+precision = 'single';
+if isfield(pulse, 'gpuPrecision')
+    precision = pulse.gpuPrecision;
+end
+if ~(ischar(precision) || isstring(precision)) || ...
+        ~ismember(char(precision), {'single', 'double'})
+    error('calcBubbleResponse_GPU:InvalidPrecision', ...
+        'GPUPrecision must be ''single'' or ''double''.');
+end
+precision = char(precision);
+end
+
+function maxStride = resolve_gpu_max_stride(pulse)
+% Resolve the upper bound on the output stride. A value of 1 disables
+% striding, so the integrator writes every microbubble sample.
+
+maxStride = 6;
+if isfield(pulse, 'gpuMaxStride')
+    maxStride = pulse.gpuMaxStride;
+end
+if ~isscalar(maxStride) || ~isnumeric(maxStride) || ~isreal(maxStride) || ...
+        ~isfinite(maxStride) || maxStride < 1 || ...
+        maxStride ~= floor(maxStride)
+    error('calcBubbleResponse_GPU:InvalidMaxStride', ...
+        'GPUMaxStride must be a positive integer.');
+end
+maxStride = double(maxStride);
 end

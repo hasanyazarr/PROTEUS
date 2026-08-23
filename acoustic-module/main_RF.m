@@ -202,10 +202,14 @@ if SimulationParameters.HybridSimulation
         AcquisitionBatch = Acquisition;
         AcquisitionBatch.StartFrame = batch_start;
         AcquisitionBatch.EndFrame = batch_end;
-        [sensor_MB_batch, MB_idx_all, max_mb_batch] = define_sensor_MB_all(...
-            Grid, groundtruthfolder, AcquisitionBatch, length(sequence), ...
-            Geometry);
+        [sensor_MB_batch, MB_idx_all, max_mb_batch, bubble_counts] = ...
+            define_sensor_MB_all(Grid, groundtruthfolder, AcquisitionBatch, ...
+            length(sequence), Geometry);
         param.max_mb = max(param.max_mb, max_mb_batch);
+        if batch_idx == 1
+            validate_evaluation_capture_yield_if_requested(...
+                SimulationParameters, bubble_counts);
+        end
 
         if ~isempty(intersect(MB_idx_all, mask_idx_trans))
             warning('Microbubbles on transducer.')
@@ -252,12 +256,25 @@ if SimulationParameters.HybridSimulation
                 sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
                 sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
 
+                stopAfterCapture = capture_sensed_pressure_if_requested(...
+                    SimulationParameters, sensed_p, MB, kgrid, Medium, ...
+                    Microbubble, Transmit, frame, pulse_seq_idx, ...
+                    Acquisition.StartFrame);
+                if stopAfterCapture
+                    return
+                end
+
                 % Complete the transducer sensor data with microbubble sources:
-                sensor_data = hybrid_simulator(...
-                    mask_idx_trans,...
-                    sensed_p, ...
-                    MB, Grid, medium, run_param, ...
-                    Medium, Microbubble, Transmit);
+                try
+                    sensor_data = hybrid_simulator(...
+                        mask_idx_trans,...
+                        sensed_p, ...
+                        MB, Grid, medium, run_param, ...
+                        Medium, Microbubble, Transmit);
+                catch exception
+                    rethrow(bubble_solver_context(...
+                        exception, frame, pulse_seq_idx))
+                end
 
                 % Update sensor data transducer:
                 sensor_data.p = sensor_data_trans.p + sensor_data.p;
@@ -284,9 +301,12 @@ if SimulationParameters.HybridSimulation
         end
     end
 else
-    [sensor_MB_all, MB_idx_all, max_mb] = define_sensor_MB_all(...
-        Grid, groundtruthfolder, Acquisition, length(sequence), Geometry);
+    [sensor_MB_all, MB_idx_all, max_mb, bubble_counts] = ...
+        define_sensor_MB_all(Grid, groundtruthfolder, Acquisition, ...
+        length(sequence), Geometry);
     param.max_mb = max_mb;
+    validate_evaluation_capture_yield_if_requested(...
+        SimulationParameters, bubble_counts);
 
     if ~isempty(intersect(MB_idx_all, mask_idx_trans))
         warning('Microbubbles on transducer.')
@@ -339,13 +359,25 @@ else
             sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
             sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
 
-            sensor_data = full_simulator(...
-                source_transducer{pulse_seq_idx}, ...
-                sensor_transducer,...
-                sensor_frame,sensor_weights_frame,mask_idx_frame,...
-                sensed_p,...
-                MB, kgrid, Grid, medium, run_param, ...
-                Medium, Microbubble, Transmit);
+            stopAfterCapture = capture_sensed_pressure_if_requested(...
+                SimulationParameters, sensed_p, MB, kgrid, Medium, ...
+                Microbubble, Transmit, frame, pulse_seq_idx, ...
+                Acquisition.StartFrame);
+            if stopAfterCapture
+                return
+            end
+
+            try
+                sensor_data = full_simulator(...
+                    source_transducer{pulse_seq_idx}, ...
+                    sensor_transducer,...
+                    sensor_frame,sensor_weights_frame,mask_idx_frame,...
+                    sensed_p,...
+                    MB, kgrid, Grid, medium, run_param, ...
+                    Medium, Microbubble, Transmit);
+            catch exception
+                rethrow(bubble_solver_context(exception, frame, pulse_seq_idx))
+            end
 
             % Compute element RF data recorded by transducer:
             t_rf = tic;
@@ -385,6 +417,142 @@ end
 
 end
 
+
+function validate_evaluation_capture_yield_if_requested(...
+    SimulationParameters, bubbleCounts)
+% Reject insufficient first-frame/first-pulse yield before k-Wave runs.
+
+if ~isfield(SimulationParameters, 'EvaluationCapture')
+    return
+end
+config = SimulationParameters.EvaluationCapture;
+if ~isfield(config, 'Enabled') || ~isscalar(config.Enabled) || ...
+        ~logical(config.Enabled) || ~isfield(config, 'RequestedBubbleCount')
+    return
+end
+requestedBubbleCount = config.RequestedBubbleCount;
+if ~isscalar(requestedBubbleCount) || ~isnumeric(requestedBubbleCount) || ...
+        requestedBubbleCount < 1 || ...
+        requestedBubbleCount ~= floor(requestedBubbleCount)
+    error('main_RF:InvalidRequestedBubbleCount', ...
+        'EvaluationCapture.RequestedBubbleCount must be a positive integer.');
+end
+validBubbleCount = bubbleCounts(1, 1);
+seededBubbleCount = validBubbleCount;
+if isfield(config, 'SeededBubbleCount')
+    seededBubbleCount = config.SeededBubbleCount;
+end
+if validBubbleCount < requestedBubbleCount
+    error('main_RF:InsufficientCapturedBubbles', ...
+        ['Evaluation capture seeded %d bubble(s), found %d valid in-grid ' ...
+         'bubble(s) in the first frame and first pulse, and requires %d.'], ...
+        seededBubbleCount, validBubbleCount, requestedBubbleCount);
+end
+end
+
+function stopAfterCapture = capture_sensed_pressure_if_requested(...
+    SimulationParameters, sensed_p, MB, kgrid, Medium, Microbubble, ...
+    Transmit, frame, pulseSequenceIndex, firstFrame)
+% Save the first incident-pressure input for offline solver evaluation.
+
+stopAfterCapture = false;
+if ~isfield(SimulationParameters, 'EvaluationCapture') || ...
+        frame ~= firstFrame || pulseSequenceIndex ~= 1
+    return
+end
+
+config = SimulationParameters.EvaluationCapture;
+if ~isfield(config, 'Enabled') || ~isscalar(config.Enabled) || ...
+        ~logical(config.Enabled)
+    return
+end
+if ~isfield(config, 'OutputPath') || isempty(config.OutputPath)
+    error('main_RF:MissingEvaluationCapturePath', ...
+        ['SimulationParameters.EvaluationCapture.OutputPath is required ' ...
+         'when capture is enabled.']);
+end
+
+validBubbleCount = numel(MB.radii);
+requestedBubbleCount = validBubbleCount;
+if isfield(config, 'RequestedBubbleCount')
+    requestedBubbleCount = config.RequestedBubbleCount;
+end
+if ~isscalar(requestedBubbleCount) || requestedBubbleCount < 1 || ...
+        requestedBubbleCount ~= floor(requestedBubbleCount)
+    error('main_RF:InvalidRequestedBubbleCount', ...
+        'EvaluationCapture.RequestedBubbleCount must be a positive integer.');
+end
+seededBubbleCount = validBubbleCount;
+if isfield(config, 'SeededBubbleCount')
+    seededBubbleCount = config.SeededBubbleCount;
+end
+if validBubbleCount < requestedBubbleCount
+    error('main_RF:InsufficientCapturedBubbles', ...
+        ['Evaluation capture seeded %d bubble(s), found %d valid in-grid ' ...
+         'bubble(s), and requires %d.'], ...
+        seededBubbleCount, validBubbleCount, requestedBubbleCount);
+end
+selectedBubbleIndices = 1:requestedBubbleCount;
+sensed_p = sensed_p(selectedBubbleIndices, :);
+radii = MB.radii(selectedBubbleIndices);
+
+capture.sensed_p = sensed_p;
+capture.radii = radii;
+capture.t_kwave = (0:(size(sensed_p, 2) - 1)) * kgrid.dt;
+capture.kgrid.dt = kgrid.dt;
+capture.kgrid.k_max = get_bubble_filter_kmax(...
+    kgrid, Medium, SimulationParameters.HybridSimulation);
+capture.Medium = Medium;
+capture.Microbubble = Microbubble;
+capture.Transmit = Transmit;
+capture.frame = frame;
+capture.pulse_sequence_index = pulseSequenceIndex;
+capture.sensed_p_dtype = class(sensed_p);
+capture.hybrid_simulation = logical(SimulationParameters.HybridSimulation);
+capture.solver = SimulationParameters.Solver;
+capture.device_number = NaN;
+if isfield(SimulationParameters, 'DeviceNumber')
+    capture.device_number = SimulationParameters.DeviceNumber;
+end
+capture.seeded_bubble_count = seededBubbleCount;
+capture.valid_bubble_count = validBubbleCount;
+capture.selected_bubble_count = requestedBubbleCount;
+capture.selected_bubble_indices = selectedBubbleIndices;
+capture.created_at = char(datetime('now', 'TimeZone', 'UTC', ...
+    'Format', 'yyyy-MM-dd''T''HH:mm:ssXXX'));
+
+outputPath = char(config.OutputPath);
+outputFolder = fileparts(outputPath);
+if ~isempty(outputFolder) && ~exist(outputFolder, 'dir')
+    mkdir(outputFolder)
+end
+save(outputPath, 'capture', '-v7.3')
+fprintf('Saved evaluation pressure capture to %s.\n', outputPath)
+
+if isfield(config, 'StopAfterCapture')
+    if ~isscalar(config.StopAfterCapture)
+        error('main_RF:InvalidStopAfterCapture', ...
+            'EvaluationCapture.StopAfterCapture must be scalar.');
+    end
+    stopAfterCapture = logical(config.StopAfterCapture);
+end
+
+end
+
+function context = bubble_solver_context(exception, frame, pulseSequenceIndex)
+% Attach frame and pulse context to a failure raised by the bubble solver.
+
+if ~startsWith(exception.identifier, 'compute_bubble_mass_source:') && ...
+        ~startsWith(exception.identifier, 'calcBubbleResponse_GPU:')
+    context = exception;
+    return
+end
+context = MException('main_RF:BubbleSolverFailed', ...
+    ['Bubble solver failed at frame %d, pulse sequence %d. No partial ' ...
+     'frame was saved; restart from frame %d.'], ...
+    frame, pulseSequenceIndex, frame);
+context = addCause(context, exception);
+end
 
 function batch_size = get_transmit_batch_size(SimulationParameters, Acquisition)
 num_frames = Acquisition.EndFrame - Acquisition.StartFrame + 1;
