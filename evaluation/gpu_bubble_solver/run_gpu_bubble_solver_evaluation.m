@@ -33,6 +33,10 @@ gpuMaxStride = 6;
 if isfield(phaseSettings.Microbubble, 'GPUMaxStride')
     gpuMaxStride = phaseSettings.Microbubble.GPUMaxStride;
 end
+gpuPressureInterp = 'pchip';
+if isfield(phaseSettings.Microbubble, 'GPUPressureInterp')
+    gpuPressureInterp = char(phaseSettings.Microbubble.GPUPressureInterp);
+end
 
 seed = 1729;
 frequencies = [2.5e6, 6e6, 18e6];
@@ -57,12 +61,14 @@ environment.gpu_rk4_max_phase_step = maxPhaseStep;
 environment.gpu_rk4_convergence_phase_step = maxPhaseStep / 2;
 environment.gpu_precision = gpuPrecision;
 environment.gpu_max_stride = gpuMaxStride;
+environment.gpu_pressure_interpolation = gpuPressureInterp;
 environment.interpolation_strides = [1, 2, 4, 6];
 environment.capture_solver = '3DG';
 write_json(fullfile(outputDir, 'environment.json'), environment)
 [interpolationMetrics, solverMetrics, analyticTimings, analyticDetails] = ...
     run_analytic_evaluation(frequencies, pressures, radii, ...
-    samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, gpuMaxStride);
+    samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, gpuMaxStride, ...
+    gpuPressureInterp);
 writetable(interpolationMetrics, fullfile(outputDir, ...
     'interpolation_metrics.csv'))
 writetable(solverMetrics, fullfile(outputDir, 'solver_agreement.csv'))
@@ -74,7 +80,7 @@ plot_response_overlay(analyticDetails, fullfile(outputDir, ...
 
 [capturePath, evaluationSettingsPath] = capture_real_pressure(...
     settingsPath, outputDir, PATHS, seed, maxPhaseStep, gpuPrecision, ...
-    gpuMaxStride);
+    gpuMaxStride, gpuPressureInterp);
 environment.evaluation_settings_path = evaluationSettingsPath;
 environment.evaluation_settings_sha256 = command_output(sprintf( ...
     'sha256sum "%s" | cut -d " " -f 1', evaluationSettingsPath));
@@ -182,7 +188,6 @@ environment.settings_sha256 = command_output(sprintf( ...
     'sha256sum "%s" | cut -d " " -f 1', settingsPath));
 environment.cpu_reference_label = 'CPU agreement reference';
 environment.gpu_solver = 'fixed-step RK4';
-environment.gpu_pressure_interpolation = 'linear';
 environment.cpu_solver = 'adaptive ode45';
 environment.cpu_pressure_interpolation = 'pchip';
 end
@@ -198,7 +203,8 @@ end
 
 function [interpolationTable, solverTable, timingTable, details] = ...
         run_analytic_evaluation(frequencies, pressures, radii, ...
-        samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, gpuMaxStride)
+        samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, ...
+        gpuMaxStride, gpuPressureInterp)
 interpolationStrides = [1, 2, 4, 6];
 [liquid, gas] = getMaterialProperties();
 liquid.ThermalModel = 'Prosperetti';
@@ -214,6 +220,7 @@ for frequency = frequencies
             numel(radii), maxPhaseStep);
         pulse.gpuPrecision = gpuPrecision;
         pulse.gpuMaxStride = gpuMaxStride;
+        pulse.gpuPressureInterp = gpuPressureInterp;
         [truthTime, truthPressure] = analytic_truth_pressure(...
             frequency, pressure, pulse.t(end), samplingRate * 16);
         % The solver interpolates pressure across its strided output grid,
@@ -419,7 +426,7 @@ end
 
 function [capturePath, temporarySettingsPath] = ...
         capture_real_pressure(settingsPath, outputDir, PATHS, seed, ...
-        maxPhaseStep, gpuPrecision, gpuMaxStride)
+        maxPhaseStep, gpuPrecision, gpuMaxStride, gpuPressureInterp)
 % The GUI saves numeric fields as integer or single classes, which the
 % streamline and acoustic modules cannot mix with double time arrays.
 settings = normalize_settings_types(load(settingsPath));
@@ -442,6 +449,7 @@ settings.Microbubble.Number = seededBubbleCount;
 settings.Microbubble.GPURK4MaxPhaseStep = maxPhaseStep;
 settings.Microbubble.GPUPrecision = gpuPrecision;
 settings.Microbubble.GPUMaxStride = gpuMaxStride;
+settings.Microbubble.GPUPressureInterp = gpuPressureInterp;
 settings.Medium.Save = true;
 settings.SimulationParameters.Solver = '3DG';
 settings.SimulationParameters.DeviceNumber = 0;

@@ -88,3 +88,82 @@ def test_gpu_batch_size_supports_manual_override_and_legacy_settings():
     assert "Microbubble.GPUBatchSize" in source
     assert "gpuBatchSetting = Microbubble.BatchSize;" in source
     assert "batchSize = gpuBatchSetting;" in source
+
+
+def test_gpu_solver_samples_pressure_with_pchip_like_the_cpu_reference():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+    defaults = (ROOT / "GUIfunctions" / "reset_microbubble.m").read_text()
+
+    assert re.search(
+        r"pressureInterp\s*=\s*resolve_gpu_pressure_interp\(pulse\);", source
+    )
+    assert "slopes = pchip_slopes(t_coarse_knots, P_coarse);" in source
+    assert "hermite_stage_weights(stage_fracs, pressureInterp)" in source
+    assert "calcBubbleResponse_GPU:InvalidPressureInterp" in source
+    assert "{'pchip', 'linear'}" in source
+    # Linear sampling stays reachable so the two can be compared head to head.
+    assert re.search(
+        r"Microbubble\.GPUPressureInterp\s*=\s*'pchip';", defaults
+    )
+
+
+def test_gpu_pressure_interpolation_is_reported_by_the_solver():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+    massSource = (
+        ROOT / "acoustic-module" / "compute_bubble_mass_source.m"
+    ).read_text()
+
+    assert "solverInfo.pressureInterp = pressureInterp;" in source
+    assert "pulse.gpuPressureInterp = Microbubble.GPUPressureInterp;" in massSource
+    assert (
+        "runInfo.gpuPressureInterp = batchSolverInfo{1}.pressureInterp;"
+        in massSource
+    )
+
+
+def test_marmottant_liquid_surface_tension_is_read_per_bubble():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # The validator lets the Marmottant branch through without checking that
+    # the shells agree, so every shell field it reads has to be per-bubble.
+    assert "s_sigl = gpuArray(toPrecision(shell(1).sig_l));" not in source
+    assert source.count("toPrecision([shell.sig_l])") == 3
+
+
+def test_rk4_step_follows_each_coarse_interval_width():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # The appended final index can leave an interval narrower than the stride,
+    # so the step has to come from the interval, not from the nominal stride.
+    assert "h_interval = gpu_coarse_step_sizes(idx_coarse, dt, n_sub);" in source
+    assert "hn  = h_interval(n);" in source
+    for stale in ("x + h2*k1x", "xd+h2*k1v", "x + h*k3x", "h6 * (k1x"):
+        assert stale not in source
+
+
+def test_coarse_grid_knots_stay_in_double_precision():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # A single-precision time value resolves the sample spacing of a pulse
+    # tens of microseconds long to about three digits, which would land in the
+    # interval widths and from there in the pchip slopes.
+    assert "t_coarse_knots = reshape(double(tq(idx_coarse)), 1, []);" in source
+    assert "dt_coarse = gpuArray(toPrecision(diff(t_coarse_knots)));" in source
+    assert "toPrecision(tq(idx_coarse))" not in source
+    # The spline back-interpolation reads the same double knots.
+    assert "tc = t_coarse_knots;" in source
+    assert "tf = reshape(double(tq), 1, []);" in source
+
+
+def test_stage_pressure_is_evaluated_inside_the_rhs_kernel():
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    # Evaluating the Hermite form outside arrayfun cost several extra kernel
+    # launches per RK4 stage, in a loop that is already launch-bound.
+    assert "function P = interp_pressure(stage)" not in source
+    assert source.count("Pi = Pn + wRise*dP + wLo*mLo + wHi*mHi;") == 2
+    assert "function [dx, dv] = rp_rhs(xi, xdi, stage)" in source
+    for kernel in ("@rp_marmottant", "@rp_core"):
+        assert f"arrayfun({kernel}, xi, xdi, ...\n                    Pn, dP, mLo, mHi, wRise, wLo, wHi" in source
+    # The stage index, not a precomputed pressure array, reaches the RHS.
+    assert "[k1x, k1v] = rp_rhs(x,          xd,          1);" in source

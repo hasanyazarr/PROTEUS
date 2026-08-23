@@ -27,6 +27,10 @@ end
 Microbubble.GPURK4MaxPhaseStep = resolve_gpu_rk4_max_phase_step(struct());
 Microbubble.GPUPrecision    = 'single';
 Microbubble.GPUMaxStride    = 6;
+% Match the CPU solver, which drives the bubbles from a pchip interpolant of
+% the transmit pressure. Sampling it linearly instead was the largest single
+% source of GPU-versus-CPU disagreement.
+Microbubble.GPUPressureInterp = 'pchip';
 
 % For Gaussian distribution only:
 Microbubble.Distribution.MeanRadius      = 2.14e-6;  % (m)
