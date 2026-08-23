@@ -15,8 +15,11 @@ function [response, eqparam, solverInfo] = calcBubbleResponse_GPU(liquid, ...
 %   pulse.gpuMaxStride     upper bound on the output stride (1 disables it)
 %   pulse.gpuPressureInterp  'pchip' (default) or 'linear'. The CPU solver
 %                            evaluates a pchip interpolant of the transmit
-%                            pressure at every stage time, so pchip is what
-%                            reproduces it; 'linear' is kept for A/B runs.
+%                            pressure at every stage time, so pchip is the
+%                            closer match; 'linear' is kept for A/B runs.
+%                            Note the two agree exactly only at stride 1: the
+%                            CPU interpolant runs through every sample, this
+%                            one only through the coarse output grid.
 %
 % Nathan Blanken, University of Twente, 2023 (original CPU version)
 % GPU adaptation, 2026
@@ -145,6 +148,13 @@ dP_coarse = diff(P_coarse, 1, 2); % [N_MB x N_coarse-1]
 % CPU reference, which evaluates a pchip interpolant instead. The shape-
 % preserving slopes are cheap to precompute once per interval and turn the
 % in-loop evaluation into three extra fused multiply-adds.
+%
+% These knots are the coarse grid, while the CPU interpolant runs through
+% every sample, so the two are the same curve only at stride 1. At stride 2
+% the measured pressure error against an analytic pulse is roughly 0.03% at
+% 2.5 MHz but 7% at 18 MHz -- still below linear sampling everywhere, but far
+% above what the CPU sees. Matching it at stride > 1 needs the slopes built on
+% the fine grid, which is not what this does.
 % The knots stay in double: at a pulse time of tens of microseconds a
 % single-precision time value resolves the sample spacing to only about
 % three digits, which would carry straight into the slopes.
