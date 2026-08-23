@@ -18,18 +18,26 @@ def test_load_rf_data_returns_frame_identity_and_pulse_metadata():
     assert "PulseInfo.CombinationFormula" in src
 
 
-def test_process_run_uses_source_frame_numbers_for_gt_export():
+def test_process_run_has_visualization_only_interface():
+    src = read("scripts/process_run.m")
+
+    assert "function process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, ..." in src
+    assert "VIZ_OUT, MODE, VIDEO_FPS, PREPROCESSING_OPTIONS)" in src
+    assert "DATASET_OUT" not in src
+    assert "dataset_sr" not in src
+    assert "gauss_point" not in src
+    assert "super-resolution" not in src.lower()
+
+
+def test_process_run_uses_source_frame_numbers_for_gt_overlay():
     src = read("scripts/process_run.m")
 
     assert "[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo] = load_RF_data" in src
-    assert "source_frame = sourceFrameNumbers(iframe);" in src
-    assert "source_frame, npad_gt" in src
-    assert "sample_metadata.source_frame_number" in src
-    assert "metadata.source_frame_numbers" in src
+    assert "sourceFrameNumbers(idx_grid(ig))" in src
 
 
-def test_process_run_records_split_aware_preprocessing_state():
-    src = read("scripts/process_run.m")
+def test_legacy_sr_export_records_split_aware_preprocessing_state():
+    src = read("scripts/+legacy/+sr/process_run.m")
 
     assert "fit_frame_mask" in src
     assert "PreprocessingState.SVDFitFrameNumbers" in src
@@ -38,8 +46,8 @@ def test_process_run_records_split_aware_preprocessing_state():
     assert "metadata.preprocessing = PreprocessingState" in src
 
 
-def test_process_run_exports_pulse_aware_labels():
-    src = read("scripts/process_run.m")
+def test_legacy_sr_export_exports_pulse_aware_labels():
+    src = read("scripts/+legacy/+sr/process_run.m")
 
     assert "pulseInfo.PulseIDsUsed" in src
     assert "PulseLabels" in src
@@ -47,8 +55,8 @@ def test_process_run_exports_pulse_aware_labels():
     assert "LabelPulsePolicy" in src
 
 
-def test_process_run_preserves_label_validity_and_overlap_instances():
-    src = read("scripts/process_run.m")
+def test_legacy_sr_export_preserves_label_validity_and_overlap_instances():
+    src = read("scripts/+legacy/+sr/process_run.m")
 
     assert "all_gt_coords_mm" in src
     assert "label_valid" in src
@@ -76,16 +84,17 @@ def test_acoustic_simulation_rejects_unmatched_tiled_trajectories():
     assert "assert_tiling_metadata_matches" in src
 
 
-def test_legacy_dataset_export_delegates_to_process_run():
+def test_legacy_dataset_export_delegates_to_legacy_package():
     src = read("scripts/dataset_export.m")
 
     assert "function dataset_export" in src
-    assert "process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER" in src
+    assert "legacy.sr.process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER" in src
+    assert "warning('dataset_export:Deprecated'" in src
     assert "PREPROCESSING_OPTIONS" in src
 
 
-def test_process_run_requires_explicit_preprocessing_for_dataset_export():
-    src = read("scripts/process_run.m")
+def test_legacy_sr_export_requires_explicit_preprocessing():
+    src = read("scripts/+legacy/+sr/process_run.m")
 
     assert "process_run:MissingPreprocessingOptions" in src
     assert "SplitMode" in src
@@ -99,13 +108,13 @@ def test_process_run_uses_explicit_svd_policy_not_hidden_constant():
 
     assert "SVD_CUTOFF       = 2" not in src
     assert "PreprocessingState.SVD.Mode" in src
-    assert "PreprocessingState.SVD.SelectedCutoff" in src
+    assert "SVDState.SelectedCutoff" in src
     assert "adaptive_energy" in src
     assert "select_svd_cutoff" in src
 
 
-def test_process_run_records_reproducibility_hashes_and_pipeline_state():
-    src = read("scripts/process_run.m")
+def test_legacy_sr_export_records_reproducibility_hashes_and_pipeline_state():
+    src = read("scripts/+legacy/+sr/process_run.m")
 
     assert "metadata.Hashes.SettingsFile" in src
     assert "metadata.Hashes.GTFlowSimulationParameters" in src
@@ -123,6 +132,12 @@ def test_file_hash_helper_exists():
 
     assert "function hash = file_hash(filename)" in src
     assert "java.security.MessageDigest" in src or "DataHash" in src
+
+
+def test_legacy_sr_package_has_private_file_hash_helper():
+    src = read("scripts/+legacy/+sr/private/file_hash.m")
+
+    assert "function hash = file_hash(filename)" in src
 
 
 def test_tiling_contract_saves_transforms_and_tile_ids():
@@ -151,8 +166,8 @@ def test_define_medium_closes_rotate_helper_before_tiling_helpers():
     assert between_helpers.splitlines().count("end") >= 2
 
 
-def test_label_policy_is_configurable_and_frame_counts_are_saved():
-    src = read("scripts/process_run.m")
+def test_legacy_sr_label_policy_is_configurable_and_frame_counts_are_saved():
+    src = read("scripts/+legacy/+sr/process_run.m")
 
     assert "LabelPolicy.VisibilityThreshold" in src
     assert "PREPROCESSING_OPTIONS.LabelPolicy" in src
@@ -193,3 +208,19 @@ def test_v4_notebook_normalizes_geometry_rotation_before_persisting_settings():
     notebook = (ROOT.parent / "notebooks/proteus_data_generation_v4.ipynb").read_text()
 
     assert "Geometry.Rotation = double(Geometry.Rotation);" in notebook
+
+
+def test_v4_notebook_uses_visualization_only_process_run():
+    notebook = (ROOT.parent / "notebooks/proteus_data_generation_v4.ipynb").read_text()
+
+    assert "DATASET_OUT" not in notebook
+    assert "dataset_sr" not in notebook
+    assert "gauss_point" not in notebook
+    assert "process_run(" in notebook
+
+
+def test_moved_legacy_diagnostic_resolves_workspace_root():
+    src = read("scripts/legacy/sr/python/plot_v7_v8_fat_diagnostic.py")
+
+    assert "Path(__file__).resolve().parents[5]" in src
+    assert "argparse.ArgumentParser" in src
