@@ -1,23 +1,31 @@
-function s = normalize_settings_types(s)
-% NORMALIZE_SETTINGS_TYPES  Recursively convert numeric struct fields to double.
+function value = normalize_settings_types(value)
+%NORMALIZE_SETTINGS_TYPES  Recursively convert numeric settings to double.
 %
-% The GUI can save settings fields as integer or single classes (e.g.
-% Geometry.Rotation). k-Wave arithmetic such as the rotation-matrix multiply
-% in generate_streamlines ("R_geom' * R_theta_img * R_geom") errors on integer
-% classes ("MTIMES is not fully supported for integer classes"). Passing every
-% loaded settings struct through this function guarantees all numeric fields
-% are double before the simulation runs.
+% The GUI and the settings generators can save fields as integer or single
+% classes (e.g. Geometry.Rotation). k-Wave arithmetic such as the
+% rotation-matrix multiply in generate_streamlines
+% ("R_geom' * R_theta_img * R_geom") errors on integer classes
+% ("MTIMES is not fully supported for integer classes"). Passing every loaded
+% settings struct through this function guarantees all numeric fields are
+% double before the simulation runs.
 %
-% Non-numeric fields (char, string, cell, logical) and already-double fields
-% are left untouched. Nested structs are handled recursively.
+% Recurses into nested structs, struct arrays, and cell arrays. Non-numeric
+% leaves (char, string, logical, function handles) are left untouched.
 
-if isstruct(s)
-    f = fieldnames(s);
-    for k = 1:numel(f)
-        s.(f{k}) = normalize_settings_types(s.(f{k}));
+if isstruct(value)
+    for index = 1:numel(value)
+        names = fieldnames(value(index));
+        for field_index = 1:numel(names)
+            name = names{field_index};
+            value(index).(name) = normalize_settings_types(value(index).(name));
+        end
     end
-elseif isnumeric(s) && ~isa(s, 'double')
-    s = double(s);
+elseif iscell(value)
+    for index = 1:numel(value)
+        value{index} = normalize_settings_types(value{index});
+    end
+elseif isnumeric(value)
+    value = double(value);
 end
 
 end
