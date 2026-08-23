@@ -1,4 +1,4 @@
-function mass_source = compute_bubble_mass_source(...
+function [mass_source, runInfo] = compute_bubble_mass_source(...
     sensed_p,  radii, kgrid, Medium, Microbubble, Transmit)
 %COMPUTE_BUBBLE_MASS_SOURCE computes the response of microbubbles to
 %pressure signals sensed_p and converts the response to a mass source
@@ -13,32 +13,72 @@ disp('=================================================================')
 % Number of microbubbles and signal length:
 [N_MB,N] = size(sensed_p);
 
+% GPU integration is opt-in because it uses a different numerical solver.
+useGPU = false;
+if isfield(Microbubble, 'UseGPU')
+    if ~isscalar(Microbubble.UseGPU)
+        error('compute_bubble_mass_source:InvalidUseGPU', ...
+            'Microbubble.UseGPU must be a scalar logical value.');
+    end
+    useGPU = logical(Microbubble.UseGPU);
+end
+gpuPrecision = resolve_gpu_precision_setting(Microbubble);
+
 % Sampling rate for the microbubble module:
 fs_MB = Microbubble.SamplingRate;
-
-% Divide the microbubbles into batches (only a limited number can be
-% processed in parallel)
-batchSize = Microbubble.BatchSize;
-Nbatch = ceil(N_MB/batchSize); % Total number of batches
-
-% Decide whether to use parfor loop or not:
-switch Microbubble.UseParfor
-    case 'on'
-        useparfor = true;
-    case 'off'
-        useparfor = false;
-    case 'auto'
-        if Nbatch>8
-            useparfor = true;
-        else
-            useparfor = false;
-        end
-end
 
 % Time vectors for k-Wave signals and microbubble module signals:
 t_kwave = (0:(N-1))*kgrid.dt;
 M = floor(t_kwave(end)*fs_MB) + 1;
 t_MB    = (0:(M-1)) / fs_MB;
+
+if N_MB == 0
+    mass_source = zeros(0, N, class(sensed_p));
+    runInfo = empty_run_info(useGPU, M, class(sensed_p));
+    return
+end
+
+if useGPU
+    hasPCT = license('test', 'Distrib_Computing_Toolbox');
+    if ~hasPCT || gpuDeviceCount("available") == 0
+        error('compute_bubble_mass_source:GPUUnavailable', ...
+            ['Microbubble.UseGPU is enabled, but Parallel Computing ' ...
+             'Toolbox and an available GPU are required.']);
+    end
+end
+
+% Divide the microbubbles into batches. Older settings without GPU-specific
+% fields retain their configured CPU batch size.
+if useGPU
+    batchSize = select_gpu_batch_size(N_MB, M, Microbubble, gpuPrecision);
+else
+    batchSize = Microbubble.BatchSize;
+end
+Nbatch = ceil(N_MB/batchSize); % Total number of batches
+
+runInfo = empty_run_info(useGPU, M, class(sensed_p));
+runInfo.batchSize = batchSize;
+runInfo.numberOfBatches = Nbatch;
+runInfo.numberOfInputBubbles = N_MB;
+
+% Decide whether to use parfor loop or not:
+if useGPU
+    % Multiple workers sharing one GPU add contention rather than throughput.
+    useparfor = false;
+else
+    switch Microbubble.UseParfor
+        case 'on'
+            useparfor = true;
+        case 'off'
+            useparfor = false;
+        case 'auto'
+            if Nbatch>8
+                useparfor = true;
+            else
+                useparfor = false;
+            end
+    end
+end
 
 % Resample signal at the sampling rate of the microbubble module:
 t_resamp1 = tic;
@@ -59,6 +99,11 @@ pulse.fs = fs_MB;
 pulse.tq = t_MB;
 pulse.t  = t_MB;
 pulse.dispProgress = false; % Do not show ODE solver progress
+pulse.gpuPrecision = gpuPrecision;
+pulse.rk4MaxPhaseStep = resolve_gpu_rk4_max_phase_step(Microbubble);
+if isfield(Microbubble, 'GPUMaxStride')
+    pulse.gpuMaxStride = Microbubble.GPUMaxStride;
+end
 
 % Get the properties of the liquid, gas, and shell:
 [liquid, gas] = get_microbubble_material_properties(Medium, Microbubble);
@@ -97,7 +142,7 @@ if useparfor
             num2str(k) '/' num2str(Nbatch) ' ...'])
 
         mass_source_cell{k} = compute_mass_source(sensed_p_cell{k}, ...
-            radii_cell{k}, Medium, Microbubble, liquid, gas, pulse);
+            radii_cell{k}, Medium, Microbubble, liquid, gas, pulse, useGPU);
 
     end
     
@@ -111,7 +156,7 @@ if useparfor
     end
     
 else
-        
+    batchSolverInfo = cell(1, Nbatch);
     for k = 1:Nbatch
 
         disp(['Simulating microbubble batch ' ...
@@ -120,9 +165,36 @@ else
         % Microbubble indices in the current batch:
         idx = get_batch_indices(k, N_MB, batchSize, radii);
 
-        mass_source(idx,:) = compute_mass_source(sensed_p(idx,:), ...
-            radii(idx), Medium, Microbubble, liquid, gas, pulse);
+        try
+            [mass_source(idx,:), batchSolverInfo{k}] = compute_mass_source(...
+                sensed_p(idx,:), radii(idx), Medium, Microbubble, ...
+                liquid, gas, pulse, useGPU);
+        catch exception
+            if useGPU
+                context = MException(...
+                    'compute_bubble_mass_source:GPUBatchFailed', ...
+                    ['GPU bubble batch %d/%d failed for original ' ...
+                     'bubble indices [%s].'], ...
+                    k, Nbatch, strjoin(string(idx), ','));
+                context = addCause(context, exception);
+                throw(context)
+            end
+            rethrow(exception)
+        end
 
+    end
+
+    if useGPU
+        runInfo.rk4SubstepsPerBatch = cellfun(...
+            @(info) info.substeps, batchSolverInfo);
+        runInfo.rk4MaxAngularFrequencyPerBatch = cellfun(...
+            @(info) info.maxAngularFrequency, batchSolverInfo);
+        runInfo.rk4ActualPhaseStepPerBatch = cellfun(...
+            @(info) info.actualPhaseStep, batchSolverInfo);
+        runInfo.stridePerBatch = cellfun(...
+            @(info) info.stride, batchSolverInfo);
+        runInfo.rk4MaxPhaseStep = batchSolverInfo{1}.maxPhaseStep;
+        runInfo.gpuPrecision = batchSolverInfo{1}.precision;
     end
 end
 fprintf('    [TIMING] ODE batches total:            %.2f s\n', toc(t_ode));
@@ -165,6 +237,109 @@ end
 % FUNCTIONS
 %==========================================================================
 
+function runInfo = empty_run_info(useGPU, numberOfOutputSamples, inputDtype)
+% Diagnostics reported back to the caller. The GPU fields stay empty on the
+% CPU path.
+
+runInfo.useGPU = useGPU;
+runInfo.batchSize = 1;
+runInfo.numberOfBatches = 0;
+runInfo.numberOfInputBubbles = 0;
+runInfo.numberOfOutputSamples = numberOfOutputSamples;
+runInfo.inputDtype = inputDtype;
+runInfo.rk4SubstepsPerBatch = [];
+runInfo.rk4MaxAngularFrequencyPerBatch = [];
+runInfo.rk4ActualPhaseStepPerBatch = [];
+runInfo.stridePerBatch = [];
+runInfo.rk4MaxPhaseStep = NaN;
+runInfo.gpuPrecision = '';
+end
+
+function precision = resolve_gpu_precision_setting(Microbubble)
+% Resolve the GPU floating-point class. Older settings default to the
+% single-precision solver the optimized GPU path was tuned for.
+
+precision = 'single';
+if isfield(Microbubble, 'GPUPrecision')
+    precision = Microbubble.GPUPrecision;
+end
+if ~(ischar(precision) || isstring(precision)) || ...
+        ~ismember(char(precision), {'single', 'double'})
+    error('compute_bubble_mass_source:InvalidGPUPrecision', ...
+        'Microbubble.GPUPrecision must be ''single'' or ''double''.');
+end
+precision = char(precision);
+end
+
+function batchSize = select_gpu_batch_size(N_MB, N_out, Microbubble, precision)
+% Select a GPU batch size from current free memory or a manual override.
+
+gpuBatchSetting = Microbubble.BatchSize;
+if isfield(Microbubble, 'GPUBatchSize')
+    gpuBatchSetting = Microbubble.GPUBatchSize;
+end
+
+if ischar(gpuBatchSetting) || ...
+        (isstring(gpuBatchSetting) && isscalar(gpuBatchSetting))
+    if ~strcmpi(gpuBatchSetting, 'auto')
+        error('compute_bubble_mass_source:InvalidGPUBatchSize', ...
+            'Microbubble.GPUBatchSize must be ''auto'' or a positive integer.');
+    end
+
+    memoryFraction = 0.50;
+    if isfield(Microbubble, 'GPUMemoryFraction')
+        memoryFraction = Microbubble.GPUMemoryFraction;
+    end
+    if ~isnumeric(memoryFraction) || ~isscalar(memoryFraction) || ...
+            ~isfinite(memoryFraction) || memoryFraction <= 0 || ...
+            memoryFraction > 1
+        error('compute_bubble_mass_source:InvalidGPUMemoryFraction', ...
+            'Microbubble.GPUMemoryFraction must be in the interval (0, 1].');
+    end
+
+    maxBatchSize = inf;
+    if isfield(Microbubble, 'GPUMaxBatchSize')
+        maxBatchSize = Microbubble.GPUMaxBatchSize;
+    end
+    if ~isnumeric(maxBatchSize) || ~isscalar(maxBatchSize) || ...
+            isnan(maxBatchSize) || maxBatchSize <= 0 || ...
+            (isfinite(maxBatchSize) && maxBatchSize ~= floor(maxBatchSize))
+        error('compute_bubble_mass_source:InvalidGPUMaxBatchSize', ...
+            'Microbubble.GPUMaxBatchSize must be a positive integer or inf.');
+    end
+
+    device = gpuDevice;
+    availableBytes = double(device.AvailableMemory);
+
+    % Pressure, radius, and velocity histories dominate persistent GPU
+    % storage. The factor of two reserves space for RK4 temporaries and
+    % allocator overhead.
+    bytesPerSample = 8;
+    if strcmp(precision, 'single')
+        bytesPerSample = 4;
+    end
+    bytesPerBubble = 2 * 3 * N_out * bytesPerSample;
+    automaticBatchSize = floor(...
+        availableBytes * memoryFraction / bytesPerBubble);
+    if automaticBatchSize < 1
+        error('compute_bubble_mass_source:InsufficientGPUMemory', ...
+            ['Available GPU memory is below the configured safe budget ' ...
+             'for one microbubble.']);
+    end
+
+    batchSize = max(1, min([N_MB, maxBatchSize, automaticBatchSize]));
+else
+    if ~isnumeric(gpuBatchSetting) || ~isscalar(gpuBatchSetting) || ...
+            ~isfinite(gpuBatchSetting) || gpuBatchSetting <= 0 || ...
+            gpuBatchSetting ~= floor(gpuBatchSetting)
+        error('compute_bubble_mass_source:InvalidGPUBatchSize', ...
+            'Microbubble.GPUBatchSize must be ''auto'' or a positive integer.');
+    end
+    batchSize = gpuBatchSetting;
+end
+
+end
+
 function idx = get_batch_indices(batchIndex, N_MB, batchSize, radii)
 % Sort the bubbles by size and group them into batches of batchSize.
 % Bubbles of similar size have similar characteristic timescales. Having
@@ -180,8 +355,8 @@ idxLinear(idxLinear>N_MB) = [];
 idx = idxSort(idxLinear);
 end
 
-function mass_source = compute_mass_source(...
-    sensed_p,  radii, Medium, Microbubble, liquid, gas, pulse)
+function [mass_source, solverInfo] = compute_mass_source(...
+    sensed_p,  radii, Medium, Microbubble, liquid, gas, pulse, useGPU)
 
 % Microbubble driving pulses:
 pulse.p = sensed_p;
@@ -194,10 +369,12 @@ shell = arrayfun(@(x) ...
 bubble = arrayfun(@(x) struct('R0',x), radii);
 
 % Compute the bubble response:
-if gpuDeviceCount > 0
-    response = calcBubbleResponse_GPU(liquid, gas, shell, bubble, pulse);
+if useGPU
+    [response, ~, solverInfo] = calcBubbleResponse_GPU(...
+        liquid, gas, shell, bubble, pulse);
 else
     response = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
+    solverInfo = struct();
 end
 
 % Compute mass source for the current batch:

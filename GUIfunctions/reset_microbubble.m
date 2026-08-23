@@ -13,6 +13,21 @@ Microbubble.ThermalModel    = 'Prosperetti';
 % Set the sampling rate [Hz] for the microbubble module:
 Microbubble.SamplingRate    = 250e6;
 
+% GPU integration uses a fixed-step solver and must be enabled explicitly:
+Microbubble.UseGPU          = false;
+Microbubble.GPUBatchSize    = 'auto';
+Microbubble.GPUMemoryFraction = 0.50;
+Microbubble.GPUMaxBatchSize = inf;
+% The microbubble solver folder is only added to the path during
+% simulations, so make the phase-step resolver reachable from the GUI:
+if isempty(which('resolve_gpu_rk4_max_phase_step'))
+    addpath(fullfile(fileparts(fileparts(mfilename('fullpath'))), ...
+        'microbubble-simulator', 'functions'));
+end
+Microbubble.GPURK4MaxPhaseStep = resolve_gpu_rk4_max_phase_step(struct());
+Microbubble.GPUPrecision    = 'single';
+Microbubble.GPUMaxStride    = 6;
+
 % For Gaussian distribution only:
 Microbubble.Distribution.MeanRadius      = 2.14e-6;  % (m)
 Microbubble.Distribution.PDI             = 5;        % (%)
