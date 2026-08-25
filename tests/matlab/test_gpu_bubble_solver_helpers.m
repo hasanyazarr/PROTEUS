@@ -43,7 +43,7 @@ catch exception
 end
 
 %% The phase-step default has one resolver and respects explicit settings.
-assert(resolve_gpu_rk4_max_phase_step(struct()) == 0.25);
+assert(resolve_gpu_rk4_max_phase_step(struct()) == 0.5);
 phaseSettings.GPURK4MaxPhaseStep = 0.125;
 assert(resolve_gpu_rk4_max_phase_step(phaseSettings) == 0.125);
 

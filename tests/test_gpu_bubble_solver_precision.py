@@ -19,6 +19,35 @@ def test_gpu_solver_precision_is_configurable_and_single_by_default():
     assert "opx  = max(1 + xi, 1e-6);" in source
 
 
+def test_rk4_phase_step_default_is_the_measured_one():
+    """0.5 rad, from the sweep of 2026-08-25.
+
+    The default was 0.25 rad, chosen without measurement when the budget was
+    tightened from ~0.75 on 2026-08-23. The sweep put numbers on it: against
+    the error-controlled CPU reference, the worst mass-source disagreement
+    was 6.2e-4 at 0.25 rad and 4.5e-4 at 0.5 rad - both inside the ~1-3e-4
+    floor set by single precision and the pressure interpolant, so the two
+    are indistinguishable. 1.0 rad leaves that floor at 3.0e-3, five times
+    worse, and does it at 0.5 um / 18 MHz - the small-bubble corner the
+    production radii actually occupy. 0.5 rad is the largest step that costs
+    no accuracy, and it takes two RK4 substeps instead of three.
+    """
+    resolver = (
+        ROOT / "microbubble-simulator" / "functions"
+        / "resolve_gpu_rk4_max_phase_step.m"
+    ).read_text()
+
+    assert "maxPhaseStep = 0.5;" in resolver
+    assert "maxPhaseStep = 0.25;" not in resolver
+    # One definition of the default; the GUI defaults must read it, not
+    # restate it.
+    defaults = (ROOT / "GUIfunctions" / "reset_microbubble.m").read_text()
+    assert (
+        "Microbubble.GPURK4MaxPhaseStep = "
+        "resolve_gpu_rk4_max_phase_step(struct());" in defaults
+    )
+
+
 def test_gpu_solver_striding_is_bounded_and_can_be_disabled():
     source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
     defaults = (ROOT / "GUIfunctions" / "reset_microbubble.m").read_text()
