@@ -102,10 +102,35 @@ def test_frame_line_reports_progress_stages_and_eta():
     # ODE measures part of MB; printing them as sibling columns invites
     # summing a row whose entries overlap.
     assert "NESTED = {'ODE', 'MB'};" in src
-    assert "ORDER = {'MB', 'prop', 'RF'};" in src
+    assert "ORDER = {'load', 'sense', 'MB', 'prop', 'RF', 'save'};" in src
     # An 8-hour run needs to say when it will finish.
     assert "sprintf('ETA %s'" in src
     assert "function text = format_duration(seconds)" in src
+
+
+def test_every_part_of_the_frame_is_accounted_for():
+    """The frame line used to explain only two thirds of the frame.
+
+    Measured 2026-08-25 on a 1000-frame run: MB 3.4 s, prop 5.8 s, RF 1.1 s
+    against a 14.8 s frame, leaving 4.5 s - 30% of every frame - under no
+    stage at all. That is more than the whole bubble solver, and nothing
+    could be aimed at it while it was invisible. The work between the timed
+    stages is loading the frame's bubbles and building its sensor, taking
+    the batch's recorded pressure down to this frame's points, and writing
+    the result.
+    """
+    src = read("acoustic-module/main_RF.m")
+
+    assert "run_log('stage', 'load', toc(t_load));" in src
+    assert "run_log('stage', 'sense', toc(t_sense));" in src
+    assert "run_log('stage', 'save', toc(t_save));" in src
+    # The stages have to bracket the real work, not just exist.
+    for timer, call in (("t_load", "load_microbubbles("),
+                        ("t_sense", "extract_sensor_subset("),
+                        ("t_save", "save([savedir filesep file_name]")):
+        opened = src.index(timer + " = tic;")
+        closed = src.index("toc(" + timer + ")")
+        assert opened < src.index(call) < closed, timer
 
 
 def test_solver_banner_carries_policy_not_per_frame_counts():

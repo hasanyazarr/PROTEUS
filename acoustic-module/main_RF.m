@@ -247,6 +247,8 @@ if SimulationParameters.HybridSimulation
 
             for pulse_seq_idx = 1 : length(sequence)
 
+                % Reading this frame's bubbles and building its sensor.
+                t_load = tic;
                 MB = load_microbubbles(groundtruthfolder, frame, pulse_seq_idx, ...
                     Geometry, Acquisition.NumberOfFrames);
 
@@ -256,7 +258,13 @@ if SimulationParameters.HybridSimulation
 
                 mask_idx_frame = find(logical(sensor_frame.mask));
                 n_mb_time = floor(run_param.tr(1) / kgrid.dt) + 1;
+                run_log('stage', 'load', toc(t_load));
 
+                % Taking the batch's recorded transmit down to this frame's
+                % bubble positions. The batch sensor covers every frame in
+                % the batch, so this both selects rows and applies the
+                % per-bubble interpolation weights.
+                t_sense = tic;
                 sensor_data_MB = extract_sensor_subset(...
                     sensor_data_MB_1iter{pulse_seq_idx}, ...
                     mask_idx_MB_batch, mask_idx_frame, n_mb_time);
@@ -265,6 +273,7 @@ if SimulationParameters.HybridSimulation
                 % Pressure sensed by the microbubbles
                 sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
                 sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
+                run_log('stage', 'sense', toc(t_sense));
 
                 stopAfterCapture = capture_sensed_pressure_if_requested(...
                     SimulationParameters, sensed_p, MB, kgrid, Medium, ...
@@ -304,7 +313,9 @@ if SimulationParameters.HybridSimulation
             % Find out how many zero padding you'll need for file name
             num_padding=num2str(length(num2str(Acquisition.NumberOfFrames)));
             file_name = ['Frame_', num2str(frame,['%0',num_padding,'i']),'.mat'];
+            t_save = tic;
             save([savedir filesep file_name], 'RF', 'dt', 'Frame')
+            run_log('stage', 'save', toc(t_save));
 
             execution_times(frame) = toc(tstart);
             run_log('frame', frame, Acquisition.EndFrame, toc(t_frame));

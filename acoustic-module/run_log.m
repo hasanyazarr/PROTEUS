@@ -26,7 +26,7 @@ STATE_KEY = 'PROTEUS_run_log';
 
 % Reading order for the top-level stages; anything unlisted keeps its
 % arrival order after these.
-ORDER = {'MB', 'prop', 'RF'};
+ORDER = {'load', 'sense', 'MB', 'prop', 'RF', 'save'};
 
 % Stages that measure part of another stage, as {child, parent}.
 NESTED = {'ODE', 'MB'};
