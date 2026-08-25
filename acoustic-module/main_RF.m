@@ -165,10 +165,9 @@ end
 % path changes, so every frame re-parsed the module and reset the run log's
 % banner state. The cleanup object restores the path on any exit, including
 % the early return of the pressure-capture path and any error.
-addpath(run_param.MicrobubblePath)
-addpath(fullfile(run_param.MicrobubblePath, 'functions'))
+addedMicrobubblePaths = add_microbubble_path(run_param);
 microbubblePathCleanup = onCleanup(@() ...
-    remove_microbubble_path(run_param)); %#ok<NASGU>
+    remove_microbubble_path(addedMicrobubblePaths)); %#ok<NASGU>
 
 % Timer for frames+MB part (after initial transmit):
 run_log('reset');
@@ -427,11 +426,47 @@ end
 end
 
 
-function remove_microbubble_path(run_param)
+function addedPaths = add_microbubble_path(run_param)
+% Add the microbubble module for the acquisition, reporting what was new.
+%
+% Only the entries this call actually adds are returned. A caller may already
+% have the module on the path and still need it after main_RF returns - the
+% GPU solver evaluation adds it, calls main_RF to capture pressure, and then
+% replays that pressure through compute_bubble_mass_source. Removing an entry
+% this function did not add left that caller without the module.
+
+candidatePaths = {run_param.MicrobubblePath, ...
+    fullfile(run_param.MicrobubblePath, 'functions')};
+addedPaths = {};
+for i = 1:numel(candidatePaths)
+    if ~is_on_search_path(candidatePaths{i})
+        addpath(candidatePaths{i})
+        addedPaths{end + 1} = candidatePaths{i}; %#ok<AGROW>
+    end
+end
+
+end
+
+
+function remove_microbubble_path(addedPaths)
 % Undo the acquisition-wide addpath of the microbubble module.
 
-rmpath(run_param.MicrobubblePath)
-rmpath(fullfile(run_param.MicrobubblePath, 'functions'))
+for i = 1:numel(addedPaths)
+    if is_on_search_path(addedPaths{i})
+        rmpath(addedPaths{i})
+    end
+end
+
+end
+
+
+function tf = is_on_search_path(candidatePath)
+% True when CANDIDATEPATH is already an entry of the MATLAB search path.
+
+entries = strsplit(path, pathsep);
+normalize = @(p) regexprep(p, [regexptranslate('escape', filesep) '+$'], '');
+tf = any(strcmp(cellfun(normalize, entries, 'UniformOutput', false), ...
+    normalize(candidatePath)));
 
 end
 

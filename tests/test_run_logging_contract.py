@@ -66,11 +66,32 @@ def test_microbubble_path_is_managed_once_per_acquisition():
         assert "MicrobubblePath" not in src, f"{relpath} still edits the path"
 
     src = read("acoustic-module/main_RF.m")
-    assert "addpath(run_param.MicrobubblePath)" in src
+    assert "addedMicrobubblePaths = add_microbubble_path(run_param)" in src
+    assert "function addedPaths = add_microbubble_path(run_param)" in src
     # Restored on every exit, including the capture path's early return.
     assert "onCleanup" in src
-    assert "function remove_microbubble_path(run_param)" in src
-    assert "rmpath(run_param.MicrobubblePath)" in src
+    assert "remove_microbubble_path(addedMicrobubblePaths)" in src
+    assert "function remove_microbubble_path(addedPaths)" in src
+
+
+def test_microbubble_path_cleanup_only_removes_what_it_added():
+    """A caller that already had the module on the path keeps it.
+
+    The GPU solver evaluation adds the microbubble module, calls main_RF to
+    capture pressure, then replays that pressure through
+    compute_bubble_mass_source. An unconditional rmpath left it without
+    resolve_gpu_rk4_max_phase_step after the capture returned.
+    """
+    src = read("acoustic-module/main_RF.m")
+
+    # Nothing is added, or removed, without checking the search path first.
+    assert "if ~is_on_search_path(candidatePaths{i})" in src
+    assert "if is_on_search_path(addedPaths{i})" in src
+    assert "function tf = is_on_search_path(candidatePath)" in src
+
+    # The old unconditional form must not come back.
+    assert "rmpath(run_param.MicrobubblePath)" not in src
+    assert "addpath(run_param.MicrobubblePath)" not in src
 
 
 def test_frame_line_reports_progress_stages_and_eta():
