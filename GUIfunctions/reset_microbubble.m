@@ -13,8 +13,16 @@ Microbubble.ThermalModel    = 'Prosperetti';
 % Set the sampling rate [Hz] for the microbubble module:
 Microbubble.SamplingRate    = 250e6;
 
-% GPU integration uses a fixed-step solver and must be enabled explicitly:
-Microbubble.UseGPU          = false;
+% GPU integration uses a fixed-step RK4 solver instead of ode45. It was off
+% by default from 2026-08-23, when it became opt-in because nothing had
+% measured it against the CPU reference. The sweep and throughput benchmark
+% of 2026-08-25 did: at the production count of 200 bubbles the GPU stage
+% takes 3.4 s against ode45's 32.5 s, and its worst disagreement with that
+% error-controlled reference stays inside the floor that single precision
+% and the pressure interpolant impose regardless of step size. Still a
+% field rather than a hardware test, so a settings file records which
+% solver ran:
+Microbubble.UseGPU          = true;
 Microbubble.GPUBatchSize    = 'auto';
 Microbubble.GPUMemoryFraction = 0.50;
 Microbubble.GPUMaxBatchSize = inf;

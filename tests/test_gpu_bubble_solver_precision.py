@@ -168,7 +168,19 @@ def test_gpu_execution_is_explicit_and_preserves_batch_configuration():
     source = (ROOT / "acoustic-module" / "compute_bubble_mass_source.m").read_text()
     defaults = (ROOT / "GUIfunctions" / "reset_microbubble.m").read_text()
 
-    assert re.search(r"Microbubble\.UseGPU\s*=\s*false;", defaults)
+    # On by default since 2026-08-25. It was off from 2026-08-23, when the
+    # GPU path became opt-in because it is a different numerical solver and
+    # nothing had measured it. The sweep and the throughput benchmark did:
+    # at the production count of 200 bubbles the GPU stage takes 3.4 s
+    # against ode45's 32.5 s, and its worst disagreement with that
+    # error-controlled reference sits inside the floor single precision and
+    # the pressure interpolant impose regardless of step size. A settings
+    # file that says nothing should get the faster solver.
+    assert re.search(r"Microbubble\.UseGPU\s*=\s*true;", defaults)
+    assert "Microbubble.UseGPU          = false;" not in defaults
+    # Still explicit rather than inferred from the hardware: the old
+    # 'gpuDeviceCount > 0' switched solver silently on any GPU machine.
+    assert "if gpuDeviceCount > 0" not in source
     assert "isfield(Microbubble, 'UseGPU')" in source
     assert "license('test', 'Distrib_Computing_Toolbox')" in source
     assert 'gpuDeviceCount("available")' in source
