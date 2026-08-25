@@ -159,6 +159,17 @@ end
 %==========================================================================
 % Second & Third iterations (frames + MB part)
 
+% Add the microbubble module to the path for the whole acquisition. This used
+% to be done and undone inside the per-frame simulator call, which changed the
+% search path twice per frame; MATLAB drops functions from memory when the
+% path changes, so every frame re-parsed the module and reset the run log's
+% banner state. The cleanup object restores the path on any exit, including
+% the early return of the pressure-capture path and any error.
+addpath(run_param.MicrobubblePath)
+addpath(fullfile(run_param.MicrobubblePath, 'functions'))
+microbubblePathCleanup = onCleanup(@() ...
+    remove_microbubble_path(run_param)); %#ok<NASGU>
+
 % Timer for frames+MB part (after initial transmit):
 run_log('reset');
 t_frames_start = tic;
@@ -412,6 +423,15 @@ if saveExecutionTimes == true
     file_name = 'execution_time_history.mat';
     save([savedir filesep file_name], 'execution_times')
 end
+
+end
+
+
+function remove_microbubble_path(run_param)
+% Undo the acquisition-wide addpath of the microbubble module.
+
+rmpath(run_param.MicrobubblePath)
+rmpath(fullfile(run_param.MicrobubblePath, 'functions'))
 
 end
 

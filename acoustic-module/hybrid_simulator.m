@@ -11,10 +11,6 @@ max_dist        = run_param.max_dist;
 pulse_length    = run_param.pulse_length;
 N_interactions  = run_param.N_interactions;
 
-% Add the microbubble module to the path
-addpath(run_param.MicrobubblePath)
-addpath(fullfile(run_param.MicrobubblePath,'functions'))
-
 Nt = floor(t_end_1 / Grid.dt) + 1;
 
 sensed_p = sensed_p_1iter;
@@ -61,8 +57,6 @@ for iter = 1:N_interactions
 
 end
 
-disp('Simulating receive data.')
-
 % Third iteration: transducer send & record pulse ; MBs send pulse
 
 % Update number of time points:
@@ -91,9 +85,5 @@ t_prop = tic;
 sensor_data = run_simulation_homogeneous(...
     run_param, Grid, medium, source, sensor);
 run_log('stage', 'prop', toc(t_prop));
-
-% Remove the microbubble module from the path
-rmpath(run_param.MicrobubblePath)
-rmpath(fullfile(run_param.MicrobubblePath,'functions'))
 
 end

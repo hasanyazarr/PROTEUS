@@ -50,7 +50,6 @@ max_prime = 5;
 N = optimize_grid_size(N, [0 max_expansion], max_prime);
 
 % Sensed pressure at integration points:
-disp('Computing pressure at transducer integration points ...')
 if useGPU
     sensor_weights = gpuArray(sensor_weights);
     sensor_data.p  = gpuArray(sensor_data.p);
@@ -68,7 +67,6 @@ f = cast(f,dataType);
 f(:,ceil(N/2+1):N) = -(f(:,floor(1+N/2):-1:2));
 
 % Time shift in the frequency domain:
-disp('Applying lens delays ...')
 if useGPU
     delays = gpuArray(delays); 
     f      = gpuArray(f); 
@@ -90,7 +88,6 @@ if useGPU; p = gather(p); end
 IR = resample_signal(Transducer.ReceiveImpulseResponse, ...
     Transducer.SamplingRate, 1/Grid.dt, false);
 
-disp('Computing RF data ...')
 RF = convn(p,IR)*Grid.dt;
 
 end

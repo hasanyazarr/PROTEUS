@@ -87,7 +87,6 @@ end
 MS_dot_fft = fft(MS_dot_all, N_ext, 2);  % [N_source x N_ext]
 
 %% Propagation loop (still per-source due to varying distances)
-fprintf('Propagating %d sources ...', N_source);
 for m = 1:N_source
 
     % Compute the distance between source m and the sensor points:
@@ -128,7 +127,6 @@ for m = 1:N_source
     end
 
 end
-fprintf(' done.\n');
 
 end
 
