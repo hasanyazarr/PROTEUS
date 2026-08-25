@@ -29,7 +29,7 @@ STATE_KEY = 'PROTEUS_run_log';
 ORDER = {'load', 'sense', 'MB', 'prop', 'RF', 'save'};
 
 % Stages that measure part of another stage, as {child, parent}.
-NESTED = {'ODE', 'MB'};
+NESTED = {'ODE', 'MB'; 'dist', 'prop'; 'field', 'prop'; 'accum', 'prop'};
 
 % A state left behind by an earlier version of this file would be missing
 % fields, so check the shape rather than only whether something is there.

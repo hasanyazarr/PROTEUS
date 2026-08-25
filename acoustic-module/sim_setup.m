@@ -31,6 +31,16 @@ end
 % Data cast for the final RF computation step:
 run_param.DATA_CAST_RF = run_param.DATA_CAST;
 
+% Per-stage timings inside the propagation loop. gpuArray work is queued
+% asynchronously, so timing a GPU stage means synchronising the device
+% first, and that serialises a loop which is otherwise free to overlap.
+% Diagnostic only, off unless a run asks for it.
+run_param.ProfilePropagation = false;
+if isfield(SimulationParameters, 'ProfilePropagation')
+    run_param.ProfilePropagation = ...
+        logical(SimulationParameters.ProfilePropagation);
+end
+
 % Add toolbox paths:
 addpath(PATHS.VoxelisationPath);
 addpath(PATHS.kWavePath)

@@ -87,7 +87,17 @@ end
 MS_dot_fft = fft(MS_dot_all, N_ext, 2);  % [N_source x N_ext]
 
 %% Propagation loop (still per-source due to varying distances)
+% The loop is 39% of a frame and mixes work of very different kinds: CPU
+% distance arithmetic and a host-to-device transfer, a large complex
+% exponential and inverse transform on the GPU, and an expansion from the
+% distance grid back to every sensor point. profilePropagation splits them
+% apart; see stage_toc for why it is not free.
+profilePropagation = isfield(run_param, 'ProfilePropagation') && ...
+    run_param.ProfilePropagation;
+
 for m = 1:N_source
+
+    t_dist = stage_tic(profilePropagation);
 
     % Compute the distance between source m and the sensor points:
     d0 = vecnorm(sensor.points-source.points(m,:),2,2);
@@ -106,6 +116,9 @@ for m = 1:N_source
         d = cast(d,dataType);
     end
 
+    stage_toc(profilePropagation, 'dist', t_dist, useGPU);
+    t_field = stage_tic(profilePropagation);
+
     % Compute transfer function for this source's distances
     W = exp(-d * alpha_f - 2i*pi * d * f_over_c);
     W(:,ceil(N_ext/2+1):N_ext) = conj(W(:,floor(1+N_ext/2):-1:2));
@@ -119,6 +132,9 @@ for m = 1:N_source
     % Prevent sources from self-sensing:
     p(d0 == 0,:) = 0;
 
+    stage_toc(profilePropagation, 'field', t_field, useGPU);
+    t_accum = stage_tic(profilePropagation);
+
     % Add the sensed echo to the sensor data:
     if run_param.gridded
         sensor_data.p = sensor_data.p + p(i_sampled,:);
@@ -126,7 +142,40 @@ for m = 1:N_source
         sensor_data.p = sensor_data.p + p;
     end
 
+    stage_toc(profilePropagation, 'accum', t_accum, useGPU);
+
 end
+
+end
+
+
+function t = stage_tic(profilePropagation)
+% A timer only when the breakdown was asked for.
+
+if profilePropagation
+    t = tic;
+else
+    t = [];
+end
+
+end
+
+
+function stage_toc(profilePropagation, name, t, useGPU)
+% Record one propagation sub-stage.
+%
+% gpuArray operations are queued, so toc alone would report how long it
+% took to submit the work rather than to do it, and every stage but the
+% last would look free. wait() makes the number honest at the cost of
+% serialising the loop, which is why the whole breakdown is opt-in.
+
+if ~profilePropagation
+    return
+end
+if useGPU
+    wait(gpuDevice);
+end
+run_log('stage', name, toc(t));
 
 end
 

@@ -101,7 +101,7 @@ def test_frame_line_reports_progress_stages_and_eta():
     assert "case 'count'" in src
     # ODE measures part of MB; printing them as sibling columns invites
     # summing a row whose entries overlap.
-    assert "NESTED = {'ODE', 'MB'};" in src
+    assert "NESTED = {'ODE', 'MB'; 'dist', 'prop'; 'field', 'prop'; " in src
     assert "ORDER = {'load', 'sense', 'MB', 'prop', 'RF', 'save'};" in src
     # An 8-hour run needs to say when it will finish.
     assert "sprintf('ETA %s'" in src
@@ -150,3 +150,34 @@ def test_run_log_has_matlab_behavior_test():
     assert "clear functions" in src
     assert "ETA 1m30s" in src
     assert "run_log:UnknownAction" in src
+
+
+def test_propagation_substages_are_opt_in_and_synchronised():
+    """prop is 39% of a frame; its 5.8 s has no breakdown.
+
+    Measured 2026-08-25: prop 5.8 s against a 14.8 s frame, the largest
+    single stage. The loop mixes CPU distance work, a per-source transfer,
+    a large complex exp and ifft, and an expansion back to sensor points -
+    and nothing says which of those it is.
+
+    gpuArray work is queued asynchronously, so a bare toc around a GPU
+    stage measures the queueing, not the work. Honest per-stage numbers
+    need a device synchronisation, and that serialises a loop which is
+    otherwise free to overlap. So the breakdown is off unless asked for.
+    """
+    src = read("acoustic-module/run_simulation_homogeneous.m")
+    setup = read("acoustic-module/sim_setup.m")
+    log = read("acoustic-module/run_log.m")
+
+    # Off by default; a production run must not pay for the synchronisation.
+    assert "run_param.ProfilePropagation = false;" in setup
+    assert "isfield(SimulationParameters, 'ProfilePropagation')" in setup
+
+    # The three candidates the 5.8 s could be hiding in.
+    for stage in ("dist", "field", "accum"):
+        assert f"stage_toc(profilePropagation, '{stage}'" in src, stage
+        assert f"'{stage}', 'prop'" in log, stage
+
+    # Without this the GPU stages would report queueing time.
+    assert "wait(gpuDevice)" in src
+    assert "function stage_toc(" in src
