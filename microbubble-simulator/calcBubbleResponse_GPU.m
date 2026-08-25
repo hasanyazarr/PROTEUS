@@ -199,6 +199,12 @@ stage_fracs = [sub_fracs(1:end-1)', ...
 % need a lookup that cannot go inside an arrayfun, so they keep the staged
 % path. Production and the analytic evaluation are both Marmottant.
 fuseSubstep = strcmp(shell_model, 'Marmottant');
+% The kernel divides by the substep count to place its stage times. Passing
+% that count as a plain double would promote every downstream operation to
+% double, so the divisor carries the working precision while the loop bound
+% stays an ordinary count.
+nSubScale = toPrecision(n_sub);
+usePchip = strcmp(pressureInterp, 'pchip');
 
 for n = 1:(N_coarse-1)
     Pn = P_coarse(:, n)';    % [1 x N_MB] — precomputed, fast indexing
@@ -215,20 +221,17 @@ for n = 1:(N_coarse-1)
     end
 
     if fuseSubstep
-        for s = 1:n_sub
-            % One launch for the entire substep. The staged form below costs
-            % roughly 42 launches for the same arithmetic, and on [1 x N_MB]
-            % arrays a launch dominates the work it carries.
-            [x, xd, intermediateNonPositive] = arrayfun( ...
-                @rk4_substep_marmottant, ...
-                x, xd, intermediateNonPositive, Pn, dP, mLo, mHi, ...
-                W_rise(s, 1), W_lo(s, 1), W_hi(s, 1), ...
-                W_rise(s, 2), W_lo(s, 2), W_hi(s, 2), ...
-                W_rise(s, 3), W_lo(s, 3), W_hi(s, 3), ...
-                hn, hn2, hn6, ...
-                R0, kap, C1, C2, C3, C4, C5, C6, invP0, ...
-                s_chi, s_Rb, s_sigl);
-        end
+        % One launch for the whole coarse interval: the substep loop, the
+        % four stages of each substep and the clamp checks all run inside
+        % the kernel. The staged form below costs roughly 42 launches per
+        % substep for the same arithmetic, and on [1 x N_MB] arrays a launch
+        % dominates the work it carries.
+        [x, xd, intermediateNonPositive] = arrayfun( ...
+            @rk4_interval_marmottant, ...
+            x, xd, intermediateNonPositive, Pn, dP, mLo, mHi, ...
+            n_sub, nSubScale, usePchip, hn, ...
+            R0, kap, C1, C2, C3, C4, C5, C6, invP0, ...
+            s_chi, s_Rb, s_sigl);
     else
         for s = 1:n_sub
             % The stage pressures are evaluated inside the RHS kernel, so the
@@ -324,47 +327,81 @@ end
 % All literals stay untyped so the kernels run at the precision of their
 % inputs.
 
-function [xo, xdo, badOut] = rk4_substep_marmottant(xi, xdi, badIn, ...
-        Pn, dP, mLo, mHi, ...
-        w1r, w1l, w1h, w2r, w2l, w2h, w3r, w3l, w3h, ...
-        hn, hn2, hn6, ...
+function [xo, xdo, badOut] = rk4_interval_marmottant(xi, xdi, badIn, ...
+        Pn, dP, mLo, mHi, nSub, nSubScale, usePchip, hn, ...
         R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
         chi, Rb, sigl)
-    % One complete RK4 substep in a single kernel launch.
+    % Every RK4 substep of one coarse output interval, in a single launch.
     %
-    % The staged form issues a kernel per RHS evaluation and per elementwise
-    % combination - about 42 launches per substep. On [1 x N_MB] arrays every
-    % launch costs far more than the arithmetic it carries, so the launch
-    % count set the runtime. Fusing keeps the intermediates in registers.
+    % The staged form issued a kernel per RHS evaluation and per elementwise
+    % combination - about 42 per substep. Fusing one substep cut the solver
+    % stage from 35.9 s to 5.98 s, but 182 us still went to each substep for
+    % arithmetic worth a fraction of that, so what remained was per-launch
+    % cost rather than work. The substep loop therefore moves in here too.
     %
     % The arithmetic is unchanged: the same four stages, the same 1-2-2-1
     % combination, the same clamp check before every stage. Stages 2 and 3
-    % share the midpoint weights (w2*); stage 4 uses the interval end (w3*).
-    badOut = badIn | nonPositive(xi);
-    [k1x, k1v] = rp_marmottant_stage(xi, xdi, Pn, dP, mLo, mHi, ...
-        w1r, w1l, w1h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
-        chi, Rb, sigl);
+    % share the midpoint weights; stage 4 uses the interval end.
+    hn2 = 0.5 * hn;
+    hn6 = hn / 6;
+    x = xi;
+    xd = xdi;
+    badOut = badIn;
 
-    x2 = xi + hn2 * k1x;
-    badOut = badOut | nonPositive(x2);
-    [k2x, k2v] = rp_marmottant_stage(x2, xdi + hn2 * k1v, Pn, dP, mLo, mHi, ...
-        w2r, w2l, w2h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
-        chi, Rb, sigl);
+    for s = 1:nSub
+        % arrayfun cannot index the precomputed weight arrays, so the basis
+        % is rebuilt from the substep index at the three stage times.
+        f0 = (s - 1) / nSubScale;
+        f1 = (s - 0.5) / nSubScale;
+        f2 = s / nSubScale;
+        [w1r, w1l, w1h] = hermite_weights_at(f0, usePchip);
+        [w2r, w2l, w2h] = hermite_weights_at(f1, usePchip);
+        [w3r, w3l, w3h] = hermite_weights_at(f2, usePchip);
 
-    x3 = xi + hn2 * k2x;
-    badOut = badOut | nonPositive(x3);
-    [k3x, k3v] = rp_marmottant_stage(x3, xdi + hn2 * k2v, Pn, dP, mLo, mHi, ...
-        w2r, w2l, w2h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
-        chi, Rb, sigl);
+        badOut = badOut | nonPositive(x);
+        [k1x, k1v] = rp_marmottant_stage(x, xd, Pn, dP, mLo, mHi, ...
+            w1r, w1l, w1h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
+            chi, Rb, sigl);
 
-    x4 = xi + hn * k3x;
-    badOut = badOut | nonPositive(x4);
-    [k4x, k4v] = rp_marmottant_stage(x4, xdi + hn * k3v, Pn, dP, mLo, mHi, ...
-        w3r, w3l, w3h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
-        chi, Rb, sigl);
+        x2 = x + hn2 * k1x;
+        badOut = badOut | nonPositive(x2);
+        [k2x, k2v] = rp_marmottant_stage(x2, xd + hn2 * k1v, Pn, dP, ...
+            mLo, mHi, w2r, w2l, w2h, R0i, kapi, c1, c2, c3, c4, c5, c6, ...
+            invP0, chi, Rb, sigl);
 
-    xo  = xi  + hn6 * (k1x + 2 * k2x + 2 * k3x + k4x);
-    xdo = xdi + hn6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+        x3 = x + hn2 * k2x;
+        badOut = badOut | nonPositive(x3);
+        [k3x, k3v] = rp_marmottant_stage(x3, xd + hn2 * k2v, Pn, dP, ...
+            mLo, mHi, w2r, w2l, w2h, R0i, kapi, c1, c2, c3, c4, c5, c6, ...
+            invP0, chi, Rb, sigl);
+
+        x4 = x + hn * k3x;
+        badOut = badOut | nonPositive(x4);
+        [k4x, k4v] = rp_marmottant_stage(x4, xd + hn * k3v, Pn, dP, ...
+            mLo, mHi, w3r, w3l, w3h, R0i, kapi, c1, c2, c3, c4, c5, c6, ...
+            invP0, chi, Rb, sigl);
+
+        x  = x  + hn6 * (k1x + 2 * k2x + 2 * k3x + k4x);
+        xd = xd + hn6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+    end
+
+    xo = x;
+    xdo = xd;
+end
+
+
+function [wr, wl, wh] = hermite_weights_at(f, usePchip)
+    % The cubic Hermite basis at one stage time, matching the host helper
+    % hermite_stage_weights. Linear sampling differs only in the rise term:
+    % its slope weights multiply zero slopes, so they are computed either
+    % way rather than branched around.
+    if usePchip
+        wr = f * f * (3 - 2 * f);
+    else
+        wr = f;
+    end
+    wl = f * (f - 1) * (f - 1);
+    wh = f * f * (f - 1);
 end
 
 
