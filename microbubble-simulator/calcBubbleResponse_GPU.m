@@ -195,6 +195,11 @@ stage_fracs = [sub_fracs(1:end-1)', ...
     sub_fracs(2:end)'];                                  % [n_sub x 3]
 [W_rise, W_lo, W_hi] = hermite_stage_weights(stage_fracs, pressureInterp);
 
+% Marmottant runs the whole substep as one kernel; the table-based shells
+% need a lookup that cannot go inside an arrayfun, so they keep the staged
+% path. Production and the analytic evaluation are both Marmottant.
+fuseSubstep = strcmp(shell_model, 'Marmottant');
+
 for n = 1:(N_coarse-1)
     Pn = P_coarse(:, n)';    % [1 x N_MB] — precomputed, fast indexing
     dP = dP_coarse(:, n)';
@@ -209,23 +214,40 @@ for n = 1:(N_coarse-1)
         mHi = Hm_hi(:, n)';
     end
 
-    for s = 1:n_sub
-        % The stage pressures are evaluated inside the RHS kernel, so the
-        % interpolation costs fused arithmetic instead of its own launches.
-        track_invalid_state(x);
-        [k1x, k1v] = rp_rhs(x,          xd,          1);
-        k2StateX = x + hn2*k1x;
-        track_invalid_state(k2StateX);
-        [k2x, k2v] = rp_rhs(k2StateX,   xd+hn2*k1v,  2);
-        k3StateX = x + hn2*k2x;
-        track_invalid_state(k3StateX);
-        [k3x, k3v] = rp_rhs(k3StateX,   xd+hn2*k2v,  2);
-        k4StateX = x + hn*k3x;
-        track_invalid_state(k4StateX);
-        [k4x, k4v] = rp_rhs(k4StateX,   xd+hn*k3v,   3);
+    if fuseSubstep
+        for s = 1:n_sub
+            % One launch for the entire substep. The staged form below costs
+            % roughly 42 launches for the same arithmetic, and on [1 x N_MB]
+            % arrays a launch dominates the work it carries.
+            [x, xd, intermediateNonPositive] = arrayfun( ...
+                @rk4_substep_marmottant, ...
+                x, xd, intermediateNonPositive, Pn, dP, mLo, mHi, ...
+                W_rise(s, 1), W_lo(s, 1), W_hi(s, 1), ...
+                W_rise(s, 2), W_lo(s, 2), W_hi(s, 2), ...
+                W_rise(s, 3), W_lo(s, 3), W_hi(s, 3), ...
+                hn, hn2, hn6, ...
+                R0, kap, C1, C2, C3, C4, C5, C6, invP0, ...
+                s_chi, s_Rb, s_sigl);
+        end
+    else
+        for s = 1:n_sub
+            % The stage pressures are evaluated inside the RHS kernel, so the
+            % interpolation costs fused arithmetic instead of its own launches.
+            track_invalid_state(x);
+            [k1x, k1v] = rp_rhs(x,          xd,          1);
+            k2StateX = x + hn2*k1x;
+            track_invalid_state(k2StateX);
+            [k2x, k2v] = rp_rhs(k2StateX,   xd+hn2*k1v,  2);
+            k3StateX = x + hn2*k2x;
+            track_invalid_state(k3StateX);
+            [k3x, k3v] = rp_rhs(k3StateX,   xd+hn2*k2v,  2);
+            k4StateX = x + hn*k3x;
+            track_invalid_state(k4StateX);
+            [k4x, k4v] = rp_rhs(k4StateX,   xd+hn*k3v,   3);
 
-        x  = x  + hn6 * (k1x + two*k2x + two*k3x + k4x);
-        xd = xd + hn6 * (k1v + two*k2v + two*k3v + k4v);
+            x  = x  + hn6 * (k1x + two*k2x + two*k3x + k4x);
+            xd = xd + hn6 * (k1v + two*k2v + two*k3v + k4v);
+        end
     end
 
     X_coarse(n+1,:)  = x;
@@ -260,30 +282,22 @@ end
 
 %% ===== Nested helpers (share the integration workspace) =====
     function track_invalid_state(xi)
-        intermediateNonPositive = intermediateNonPositive | 1 + xi <= 0;
+        intermediateNonPositive = intermediateNonPositive | nonPositive(xi);
     end
 
     function [dx, dv] = rp_rhs(xi, xdi, stage)
         % STAGE selects the RK4 stage time within the current substep; its
         % Hermite weights turn the interval endpoints into the stage pressure.
+        % Only the table-based shells reach here: Marmottant runs the fused
+        % substep kernel instead.
         wRise = W_rise(s, stage);
         wLo   = W_lo(s, stage);
         wHi   = W_hi(s, stage);
-        switch shell_model
-            case 'Marmottant'
-                % Fully fused: pressure + surface tension + RP in one kernel
-                [dx, dv] = arrayfun(@rp_marmottant, xi, xdi, ...
-                    Pn, dP, mLo, mHi, wRise, wLo, wHi, ...
-                    R0, kap, C1, C2, C3, C4, C5, C6, invP0, ...
-                    s_chi, s_Rb, s_sigl);
-
-            otherwise
-                % Compute surface tension separately, then fuse pressure + RP
-                sig = compute_sig(xi);
-                [dx, dv] = arrayfun(@rp_core, xi, xdi, ...
-                    Pn, dP, mLo, mHi, wRise, wLo, wHi, sig, ...
-                    kap, C1, C2, C3, C4, C5, C6, invP0);
-        end
+        % Compute surface tension separately, then fuse pressure + RP
+        sig = compute_sig(xi);
+        [dx, dv] = arrayfun(@rp_core, xi, xdi, ...
+            Pn, dP, mLo, mHi, wRise, wLo, wHi, sig, ...
+            kap, C1, C2, C3, C4, C5, C6, invP0);
     end
 
     function sig = compute_sig(xi)
@@ -310,7 +324,59 @@ end
 % All literals stay untyped so the kernels run at the precision of their
 % inputs.
 
-function [dx, dv] = rp_marmottant(xi, xdi, ...
+function [xo, xdo, badOut] = rk4_substep_marmottant(xi, xdi, badIn, ...
+        Pn, dP, mLo, mHi, ...
+        w1r, w1l, w1h, w2r, w2l, w2h, w3r, w3l, w3h, ...
+        hn, hn2, hn6, ...
+        R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
+        chi, Rb, sigl)
+    % One complete RK4 substep in a single kernel launch.
+    %
+    % The staged form issues a kernel per RHS evaluation and per elementwise
+    % combination - about 42 launches per substep. On [1 x N_MB] arrays every
+    % launch costs far more than the arithmetic it carries, so the launch
+    % count set the runtime. Fusing keeps the intermediates in registers.
+    %
+    % The arithmetic is unchanged: the same four stages, the same 1-2-2-1
+    % combination, the same clamp check before every stage. Stages 2 and 3
+    % share the midpoint weights (w2*); stage 4 uses the interval end (w3*).
+    badOut = badIn | nonPositive(xi);
+    [k1x, k1v] = rp_marmottant_stage(xi, xdi, Pn, dP, mLo, mHi, ...
+        w1r, w1l, w1h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
+        chi, Rb, sigl);
+
+    x2 = xi + hn2 * k1x;
+    badOut = badOut | nonPositive(x2);
+    [k2x, k2v] = rp_marmottant_stage(x2, xdi + hn2 * k1v, Pn, dP, mLo, mHi, ...
+        w2r, w2l, w2h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
+        chi, Rb, sigl);
+
+    x3 = xi + hn2 * k2x;
+    badOut = badOut | nonPositive(x3);
+    [k3x, k3v] = rp_marmottant_stage(x3, xdi + hn2 * k2v, Pn, dP, mLo, mHi, ...
+        w2r, w2l, w2h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
+        chi, Rb, sigl);
+
+    x4 = xi + hn * k3x;
+    badOut = badOut | nonPositive(x4);
+    [k4x, k4v] = rp_marmottant_stage(x4, xdi + hn * k3v, Pn, dP, mLo, mHi, ...
+        w3r, w3l, w3h, R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
+        chi, Rb, sigl);
+
+    xo  = xi  + hn6 * (k1x + 2 * k2x + 2 * k3x + k4x);
+    xdo = xdi + hn6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+end
+
+
+function tf = nonPositive(xi)
+    % The kernels clamp 1+x away from zero to stay differentiable. This is
+    % the single definition of "the clamp would have been hit", shared by the
+    % fused kernel and the staged path's tracker.
+    tf = 1 + xi <= 0;
+end
+
+
+function [dx, dv] = rp_marmottant_stage(xi, xdi, ...
         Pn, dP, mLo, mHi, wRise, wLo, wHi, ...
         R0i, kapi, c1, c2, c3, c4, c5, c6, invP0, ...
         chi, Rb, sigl)

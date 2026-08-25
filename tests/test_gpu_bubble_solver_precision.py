@@ -33,11 +33,49 @@ def test_gpu_solver_rejects_states_the_fused_kernels_would_clamp():
     source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
 
     assert "intermediateNonPositive = gpuArray(false(1, N_MB));" in source
-    assert source.count("track_invalid_state(") >= 5
     assert (
         "validate_gpu_bubble_states(X_out, Xd_out, "
         "gather(intermediateNonPositive));" in source
     )
+    # Every stage state is still checked, on the Marmottant path inside the
+    # fused kernel and on the table-shell path through the helper.
+    assert source.count("track_invalid_state(") >= 5
+    assert source.count("nonPositive(") >= 4
+
+
+def test_marmottant_substep_runs_as_one_fused_kernel():
+    """A whole RK4 substep is one arrayfun launch, not one per stage.
+
+    The substep loop used to issue roughly 42 kernel launches - four RHS
+    evaluations plus the elementwise stage combinations and clamp checks.
+    On [1 x N_MB] arrays every launch costs more than the arithmetic it
+    carries, so the launch count, not the work, set the runtime.
+    """
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+
+    assert "function [xo, xdo, badOut] = rk4_substep_marmottant(" in source
+    assert re.search(
+        r"\[x, xd, intermediateNonPositive\] = arrayfun\(\s*\.\.\.\s*\n"
+        r"\s*@rk4_substep_marmottant", source
+    )
+    # The four stages live inside the kernel, so the stage helper is called
+    # from kernel code and never from the loop that drives the substeps.
+    assert "rp_marmottant_stage(" in source
+
+
+def test_fused_substep_keeps_the_arithmetic_of_the_staged_path():
+    """The fusion changes launch structure only, never the RK4 formula."""
+    source = (ROOT / "microbubble-simulator" / "calcBubbleResponse_GPU.m").read_text()
+    kernel = source.split("function [xo, xdo, badOut] = rk4_substep_marmottant(")[1]
+
+    # Classic RK4: two half steps, one full step, and the 1-2-2-1 combination.
+    assert "x2 = xi + hn2 * k1x;" in kernel
+    assert "x3 = xi + hn2 * k2x;" in kernel
+    assert "x4 = xi + hn * k3x;" in kernel
+    assert "xo  = xi  + hn6 * (k1x + 2 * k2x + 2 * k3x + k4x);" in kernel
+    assert "xdo = xdi + hn6 * (k1v + 2 * k2v + 2 * k3v + k4v);" in kernel
+    # Stages 2 and 3 share the midpoint weights; stage 4 uses the interval end.
+    assert kernel.count("w2r, w2l, w2h, R0i") == 2
 
 
 def test_gpu_solver_exposes_optional_diagnostics_without_changing_inputs():
@@ -163,7 +201,11 @@ def test_stage_pressure_is_evaluated_inside_the_rhs_kernel():
     assert "function P = interp_pressure(stage)" not in source
     assert source.count("Pi = Pn + wRise*dP + wLo*mLo + wHi*mHi;") == 2
     assert "function [dx, dv] = rp_rhs(xi, xdi, stage)" in source
-    for kernel in ("@rp_marmottant", "@rp_core"):
-        assert f"arrayfun({kernel}, xi, xdi, ...\n                    Pn, dP, mLo, mHi, wRise, wLo, wHi" in source
+    # Both launches carry the interval endpoints and the stage weights, so the
+    # pressure is rebuilt in registers; a precomputed pressure array never
+    # reaches a kernel.
+    for kernel in ("@rk4_substep_marmottant", "@rp_core"):
+        launch = source.index(kernel + ",")
+        assert "Pn, dP, mLo, mHi" in source[launch:launch + 300], kernel
     # The stage index, not a precomputed pressure array, reaches the RHS.
     assert "[k1x, k1v] = rp_rhs(x,          xd,          1);" in source
