@@ -297,3 +297,56 @@ def test_each_swept_point_is_timed_after_a_warm_up():
     assert source.count("gpuDurations(repeatIndex) = toc(gpuTimer);") == 2
     assert "allSweepSeconds(phaseIndex) = median(allGpuDurations);" in source
     assert "sweepSeconds(phaseIndex) = median(gpuDurations);" in source
+
+
+def test_throughput_benchmark_reuses_the_capture_instead_of_running_k_wave():
+    """The production question is which solver wins at Microbubble.Number.
+
+    The phase-step sweep timed the GPU solver at whatever count its capture
+    happened to hold. Whether Microbubble.UseGPU should be on is a different
+    question, and it needs the production bubble count. A k-Wave capture
+    costs ~20 minutes and the timings do not depend on what the pressure
+    contains, only on how many rows it has, so the benchmark replays an
+    existing capture.
+    """
+    source = (
+        ROOT / "evaluation" / "gpu_bubble_solver"
+        / "run_solver_throughput_benchmark.m"
+    ).read_text()
+
+    assert "addParameter(parser, 'CapturePath'" in source
+    assert "gpuBubbleThroughput:MissingCapture" in source
+    # Nothing here may start a simulation.
+    assert "main_RF" not in source
+    assert "generate_streamlines" not in source
+    # 200 is the production count in the v4 notebook; the rest bracket it.
+    assert "200" in source
+
+
+def test_throughput_benchmark_times_both_solvers_with_production_settings():
+    source = (
+        ROOT / "evaluation" / "gpu_bubble_solver"
+        / "run_solver_throughput_benchmark.m"
+    ).read_text()
+
+    assert "cpuConfig.UseGPU = false;" in source
+    assert "gpuConfig.UseGPU = true;" in source
+    # Starting the pool costs tens of seconds and would otherwise land on
+    # whichever bubble count ran first.
+    assert "parpool" in source
+    assert "warm_up_solver(" in source
+    # compute_bubble_mass_source only reaches parfor above eight batches, so
+    # the batch count is what explains a CPU timing.
+    assert "numberOfBatches" in source
+    assert "rk4SubstepsPerBatch" in source
+
+
+def test_throughput_benchmark_draws_a_representative_radius_population():
+    """Radius sets the GPU substep count and the CPU step adaptation alike."""
+    source = (
+        ROOT / "evaluation" / "gpu_bubble_solver"
+        / "run_solver_throughput_benchmark.m"
+    ).read_text()
+
+    assert "function [pressure, radii] = draw_population(capture, n)" in source
+    assert "idx = mod(0:(n - 1), numel(capture.radii)) + 1;" in source
