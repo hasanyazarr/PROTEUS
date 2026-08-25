@@ -7,6 +7,11 @@ addParameter(parser, 'SettingsPath', fullfile(repoRoot, ...
     'simulation-settings', 'my_simulation_settings.mat'));
 addParameter(parser, 'OutputDir', fullfile(repoRoot, ...
     'evaluation_results', 'gpu_bubble_solver'));
+% Phase-step sweep. The RK4 substep count is chosen so that no substep
+% advances more than this many radians of the fastest timescale, which is the
+% only accuracy control the fixed-step solver has. Empty means "just the value
+% in the settings", which is what a plain run does.
+addParameter(parser, 'PhaseSteps', []);
 parse(parser, varargin{:});
 
 settingsPath = char(parser.Results.SettingsPath);
@@ -25,6 +30,7 @@ preflight(settingsPath, PATHS);
 gpuDevice(1);
 phaseSettings = normalize_settings_types(load(settingsPath, 'Microbubble'));
 maxPhaseStep = resolve_gpu_rk4_max_phase_step(phaseSettings.Microbubble);
+phaseSteps = resolve_phase_step_sweep(parser.Results.PhaseSteps, maxPhaseStep);
 gpuPrecision = 'single';
 if isfield(phaseSettings.Microbubble, 'GPUPrecision')
     gpuPrecision = char(phaseSettings.Microbubble.GPUPrecision);
@@ -58,7 +64,8 @@ environment.gpu_batch_mode = 'auto';
 environment.gpu_memory_fraction = 0.50;
 environment.gpu_max_batch_size = 'inf';
 environment.gpu_rk4_max_phase_step = maxPhaseStep;
-environment.gpu_rk4_convergence_phase_step = maxPhaseStep / 2;
+environment.gpu_rk4_phase_step_sweep = phaseSteps;
+environment.gpu_rk4_convergence_phase_step = phaseSteps(1) / 2;
 environment.gpu_precision = gpuPrecision;
 environment.gpu_max_stride = gpuMaxStride;
 environment.gpu_pressure_interpolation = gpuPressureInterp;
@@ -67,7 +74,7 @@ environment.capture_solver = '3DG';
 write_json(fullfile(outputDir, 'environment.json'), environment)
 [interpolationMetrics, solverMetrics, analyticTimings, analyticDetails] = ...
     run_analytic_evaluation(frequencies, pressures, radii, ...
-    samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, gpuMaxStride, ...
+    samplingRate, gpuRepeats, phaseSteps, gpuPrecision, gpuMaxStride, ...
     gpuPressureInterp);
 writetable(interpolationMetrics, fullfile(outputDir, ...
     'interpolation_metrics.csv'))
@@ -92,7 +99,7 @@ for fieldIndex = 1:numel(captureEnvironmentFields)
 end
 write_json(fullfile(outputDir, 'environment.json'), environment)
 [realPressureMetrics, realTimings, realDetails] = ...
-    run_real_pressure_evaluation(capture, gpuRepeats);
+    run_real_pressure_evaluation(capture, gpuRepeats, phaseSteps);
 timings = [analyticTimings; realTimings];
 
 writetable(realPressureMetrics, fullfile(outputDir, ...
@@ -169,6 +176,23 @@ for i = 1:numel(requiredGeometryFiles)
 end
 end
 
+function phaseSteps = resolve_phase_step_sweep(requested, settingsPhaseStep)
+%RESOLVE_PHASE_STEP_SWEEP Validate the sweep and order it finest first.
+
+if isempty(requested)
+    phaseSteps = settingsPhaseStep;
+    return
+end
+if ~isnumeric(requested) || ~isreal(requested) || ...
+        any(~isfinite(requested)) || any(requested <= 0)
+    error('gpuBubbleEvaluation:InvalidPhaseSteps', ...
+        'PhaseSteps must be finite positive phase limits in radians.')
+end
+% Ascending, so phaseSteps(1) is the finest and can act as the reference the
+% coarser steps are measured against.
+phaseSteps = unique(double(requested(:)'));
+end
+
 function environment = collect_environment(repoRoot, settingsPath, seed)
 device = gpuDevice;
 environment.created_at_utc = char(datetime('now', 'TimeZone', 'UTC', ...
@@ -203,8 +227,13 @@ end
 
 function [interpolationTable, solverTable, timingTable, details] = ...
         run_analytic_evaluation(frequencies, pressures, radii, ...
-        samplingRate, gpuRepeats, maxPhaseStep, gpuPrecision, ...
+        samplingRate, gpuRepeats, phaseSteps, gpuPrecision, ...
         gpuMaxStride, gpuPressureInterp)
+% PHASESTEPS is swept ascending, so the first entry is the finest and serves
+% as the solver's own reference: the spread against it separates the RK4
+% discretization error from everything else that differs from the CPU path
+% (single precision, and the pressure interpolant on the coarse grid).
+maxPhaseStep = phaseSteps(1);
 interpolationStrides = [1, 2, 4, 6];
 [liquid, gas] = getMaterialProperties();
 liquid.ThermalModel = 'Prosperetti';
@@ -236,18 +265,37 @@ for frequency = frequencies
                 truthPressure, pchipPressure); %#ok<AGROW>
         end
 
+        % The CPU reference is independent of the phase step; run it once.
         cpuTimer = tic;
         cpuResponse = calcBubbleResponse(liquid, gas, shell, bubble, pulse);
         cpuSeconds = toc(cpuTimer);
-        calcBubbleResponse_GPU(liquid, gas, shell, bubble, pulse);
-        gpuDurations = zeros(gpuRepeats, 1);
-        for repeatIndex = 1:gpuRepeats
-            gpuTimer = tic;
-            [gpuResponse, ~, gpuSolverInfo] = calcBubbleResponse_GPU(...
-                liquid, gas, shell, bubble, pulse);
-            gpuDurations(repeatIndex) = toc(gpuTimer);
+
+        sweepResponses = cell(1, numel(phaseSteps));
+        sweepInfo = cell(1, numel(phaseSteps));
+        sweepSeconds = zeros(1, numel(phaseSteps));
+        for phaseIndex = 1:numel(phaseSteps)
+            sweptPulse = pulse;
+            sweptPulse.rk4MaxPhaseStep = phaseSteps(phaseIndex);
+            % One untimed call first: the first launch of a kernel pays for
+            % its compilation, which would land on whichever step ran first.
+            calcBubbleResponse_GPU(liquid, gas, shell, bubble, sweptPulse);
+            gpuDurations = zeros(gpuRepeats, 1);
+            for repeatIndex = 1:gpuRepeats
+                gpuTimer = tic;
+                [gpuResponse, ~, gpuSolverInfo] = calcBubbleResponse_GPU(...
+                    liquid, gas, shell, bubble, sweptPulse);
+                gpuDurations(repeatIndex) = toc(gpuTimer);
+            end
+            sweepResponses{phaseIndex} = gpuResponse;
+            sweepInfo{phaseIndex} = gpuSolverInfo;
+            sweepSeconds(phaseIndex) = median(gpuDurations);
         end
-        gpuMedianSeconds = median(gpuDurations);
+        finestResponse = sweepResponses{1};
+        % The finest step stands in for "the GPU result" wherever a single one
+        % is needed: the convergence check and the overlay plot.
+        gpuResponse = sweepResponses{1};
+        gpuSolverInfo = sweepInfo{1};
+
         convergence = repmat(empty_convergence_metrics(), 1, numel(radii));
         if frequency == 18e6 && pressure == 200e3
             convergenceBubbleIndex = find(radii == 0.5e-6, 1);
@@ -261,15 +309,21 @@ for frequency = frequencies
                 refinedResponse(convergenceBubbleIndex), ...
                 maxPhaseStep, refinedPulse.rk4MaxPhaseStep);
         end
-        for bubbleIndex = 1:numel(radii)
-            solverRows(end + 1) = solver_row(frequency, pressure, ...
-                radii(bubbleIndex), liquid.rho, ...
-                cpuResponse(bubbleIndex), gpuResponse(bubbleIndex), ...
-                convergence(bubbleIndex)); %#ok<AGROW>
+
+        for phaseIndex = 1:numel(phaseSteps)
+            for bubbleIndex = 1:numel(radii)
+                solverRows(end + 1) = solver_row(frequency, pressure, ...
+                    radii(bubbleIndex), liquid.rho, ...
+                    cpuResponse(bubbleIndex), ...
+                    sweepResponses{phaseIndex}(bubbleIndex), ...
+                    convergence(bubbleIndex), phaseSteps(phaseIndex), ...
+                    finestResponse(bubbleIndex), phaseSteps(1)); %#ok<AGROW>
+            end
+            timingRows(end + 1) = timing_row('analytic', frequency, ...
+                pressure, numel(radii), numel(pulse.t), cpuSeconds, ...
+                sweepSeconds(phaseIndex), NaN, ...
+                sweepInfo{phaseIndex}); %#ok<AGROW>
         end
-        timingRows(end + 1) = timing_row('analytic', frequency, ...
-            pressure, numel(radii), numel(pulse.t), cpuSeconds, ...
-            gpuMedianSeconds, NaN, gpuSolverInfo); %#ok<AGROW>
 
         if frequency == 18e6 && pressure == 200e3
             solverStride = gpuSolverInfo.stride;
@@ -289,6 +343,7 @@ for frequency = frequencies
             details.response.gpu = (gpuResponse(selectedBubble).R - ...
                 radii(selectedBubble)) / radii(selectedBubble);
             details.response.radius = radii(selectedBubble);
+            details.response.phase_step = phaseSteps(1);
             details.response.frequency = frequency;
             details.response.pressure = pressure;
         end
@@ -365,12 +420,14 @@ row.relative_peak_amplitude_error = ...
 end
 
 function row = solver_row(...
-    frequency, pressure, radius, density, cpu, gpu, convergence)
+    frequency, pressure, radius, density, cpu, gpu, convergence, ...
+    phaseStep, finest, finestPhaseStep)
 cpuExcursion = (cpu.R - radius) / radius;
 gpuExcursion = (gpu.R - radius) / radius;
 cpuMassSource = 4 * pi * density * cpu.R.^2 .* cpu.Rdot;
 gpuMassSource = 4 * pi * density * gpu.R.^2 .* gpu.Rdot;
 row.reference = {'CPU agreement reference'};
+row.rk4_max_phase_step = phaseStep;
 row.frequency_hz = frequency;
 row.pressure_pa = pressure;
 row.radius_m = radius;
@@ -390,6 +447,15 @@ row.rk4_convergence_radius_relative_l2 = convergence.radiusRelativeL2;
 row.rk4_convergence_rdot_relative_l2 = convergence.rdotRelativeL2;
 row.rk4_convergence_mass_source_relative_l2 = ...
     convergence.massSourceRelativeL2;
+% Against the finest phase step in the sweep: the solver's own discretization
+% error, with the precision and interpolant differences divided out.
+finestExcursion = (finest.R - radius) / radius;
+finestMassSource = 4 * pi * density * finest.R.^2 .* finest.Rdot;
+row.sweep_finest_phase_step = finestPhaseStep;
+row.sweep_radius_excursion_relative_l2 = relative_l2(...
+    finestExcursion, gpuExcursion);
+row.sweep_mass_source_relative_l2 = relative_l2(...
+    finestMassSource, gpuMassSource);
 end
 
 function metrics = response_convergence(...
@@ -490,7 +556,11 @@ environment.capture_device_number = capture.device_number;
 end
 
 function [metricTable, timingTable, details] = ...
-        run_real_pressure_evaluation(capture, gpuRepeats)
+        run_real_pressure_evaluation(capture, gpuRepeats, phaseSteps)
+% The arm that answers the production question: real radii, the real driving
+% pressure, and the real sample count, swept over the phase step. PHASESTEPS
+% is ascending, so its first entry is the finest and doubles as the solver's
+% own reference.
 [~, sortedIndices] = sort(capture.radii);
 nBubbles = numel(sortedIndices);
 expectedBubbleCount = capture.selected_bubble_count;
@@ -520,54 +590,89 @@ gpuConfig.UseParfor = 'off';
 gpuConfig.GPUBatchSize = 'auto';
 gpuConfig.GPUMemoryFraction = 0.50;
 gpuConfig.GPUMaxBatchSize = inf;
-compute_bubble_mass_source(subsetPressure, subsetRadii, ...
-    capture.kgrid, capture.Medium, gpuConfig, capture.Transmit);
-gpuDurations = zeros(gpuRepeats, 1);
-for repeatIndex = 1:gpuRepeats
-    gpuTimer = tic;
-    [gpuMassSource, subsetGpuInfo] = compute_bubble_mass_source(...
-        subsetPressure, subsetRadii, capture.kgrid, capture.Medium, ...
-        gpuConfig, capture.Transmit);
-    gpuDurations(repeatIndex) = toc(gpuTimer);
+sweepMassSource = cell(1, numel(phaseSteps));
+sweepInfo = cell(1, numel(phaseSteps));
+sweepSeconds = zeros(1, numel(phaseSteps));
+for phaseIndex = 1:numel(phaseSteps)
+    sweptConfig = gpuConfig;
+    sweptConfig.GPURK4MaxPhaseStep = phaseSteps(phaseIndex);
+    % Untimed warm-up so kernel compilation does not land on one step.
+    compute_bubble_mass_source(subsetPressure, subsetRadii, ...
+        capture.kgrid, capture.Medium, sweptConfig, capture.Transmit);
+    gpuDurations = zeros(gpuRepeats, 1);
+    for repeatIndex = 1:gpuRepeats
+        gpuTimer = tic;
+        [gpuMassSource, subsetGpuInfo] = compute_bubble_mass_source(...
+            subsetPressure, subsetRadii, capture.kgrid, capture.Medium, ...
+            sweptConfig, capture.Transmit);
+        gpuDurations(repeatIndex) = toc(gpuTimer);
+    end
+    sweepMassSource{phaseIndex} = gpuMassSource;
+    sweepInfo{phaseIndex} = subsetGpuInfo;
+    sweepSeconds(phaseIndex) = median(gpuDurations);
 end
-subsetGpuMedian = median(gpuDurations);
+subsetGpuInfo = sweepInfo{1};
+subsetGpuMedian = sweepSeconds(1);
+finestMassSource = sweepMassSource{1};
 
 metricRows = empty_real_pressure_rows();
-for i = 1:numel(selectedIndices)
-    row.reference = {'CPU agreement reference'};
-    row.capture_index = selectedIndices(i);
-    row.radius_m = subsetRadii(i);
-    row.mass_source_relative_l2 = relative_l2(...
-        cpuMassSource(i, :), gpuMassSource(i, :));
-    row.mass_source_max_abs = max(abs(...
-        cpuMassSource(i, :) - gpuMassSource(i, :)));
-    row.peak_time_difference_s = peak_time_difference(...
-        capture.t_kwave, cpuMassSource(i, :), ...
-        capture.t_kwave, gpuMassSource(i, :));
-    row.gpu_all_finite = all(isfinite(gpuMassSource(i, :)));
-    metricRows(end + 1) = row; %#ok<AGROW>
+for phaseIndex = 1:numel(phaseSteps)
+    gpuMassSource = sweepMassSource{phaseIndex};
+    for i = 1:numel(selectedIndices)
+        row.reference = {'CPU agreement reference'};
+        row.rk4_max_phase_step = phaseSteps(phaseIndex);
+        row.capture_index = selectedIndices(i);
+        row.radius_m = subsetRadii(i);
+        row.mass_source_relative_l2 = relative_l2(...
+            cpuMassSource(i, :), gpuMassSource(i, :));
+        row.mass_source_max_abs = max(abs(...
+            cpuMassSource(i, :) - gpuMassSource(i, :)));
+        row.peak_time_difference_s = peak_time_difference(...
+            capture.t_kwave, cpuMassSource(i, :), ...
+            capture.t_kwave, gpuMassSource(i, :));
+        row.gpu_all_finite = all(isfinite(gpuMassSource(i, :)));
+        row.sweep_finest_phase_step = phaseSteps(1);
+        row.sweep_mass_source_relative_l2 = relative_l2(...
+            finestMassSource(i, :), gpuMassSource(i, :));
+        metricRows(end + 1) = row; %#ok<AGROW>
+    end
 end
 
+% The full captured population at every phase step: the throughput half of
+% the trade, at the bubble count and sample count a production frame uses.
 allPressure = capture.sensed_p;
 allRadii = capture.radii;
-compute_bubble_mass_source(allPressure, allRadii, capture.kgrid, ...
-    capture.Medium, gpuConfig, capture.Transmit);
-allGpuDurations = zeros(gpuRepeats, 1);
-for repeatIndex = 1:gpuRepeats
-    gpuTimer = tic;
-    [allGpuMassSource, allGpuInfo] = compute_bubble_mass_source(...
-        allPressure, allRadii, capture.kgrid, capture.Medium, ...
-        gpuConfig, capture.Transmit);
-    allGpuDurations(repeatIndex) = toc(gpuTimer);
+allSweepSeconds = zeros(1, numel(phaseSteps));
+allSweepInfo = cell(1, numel(phaseSteps));
+for phaseIndex = 1:numel(phaseSteps)
+    sweptConfig = gpuConfig;
+    sweptConfig.GPURK4MaxPhaseStep = phaseSteps(phaseIndex);
+    compute_bubble_mass_source(allPressure, allRadii, capture.kgrid, ...
+        capture.Medium, sweptConfig, capture.Transmit);
+    allGpuDurations = zeros(gpuRepeats, 1);
+    for repeatIndex = 1:gpuRepeats
+        gpuTimer = tic;
+        [allGpuMassSource, allGpuInfo] = compute_bubble_mass_source(...
+            allPressure, allRadii, capture.kgrid, capture.Medium, ...
+            sweptConfig, capture.Transmit);
+        allGpuDurations(repeatIndex) = toc(gpuTimer);
+    end
+    allSweepSeconds(phaseIndex) = median(allGpuDurations);
+    allSweepInfo{phaseIndex} = allGpuInfo;
 end
+allGpuInfo = allSweepInfo{1};
 
 timingRows = empty_timing_rows();
-timingRows(end + 1) = timing_row('real_pressure_subset', NaN, NaN, ...
-    numel(selectedIndices), size(subsetPressure, 2), cpuSeconds, ...
-    subsetGpuMedian, subsetGpuInfo.batchSize, subsetGpuInfo);
-timingRows(end + 1) = timing_row('real_pressure_all', NaN, NaN, ...
-    nBubbles, size(allPressure, 2), NaN, median(allGpuDurations), ...
-    allGpuInfo.batchSize, allGpuInfo);
+for phaseIndex = 1:numel(phaseSteps)
+    timingRows(end + 1) = timing_row('real_pressure_subset', NaN, NaN, ...
+        numel(selectedIndices), size(subsetPressure, 2), cpuSeconds, ...
+        sweepSeconds(phaseIndex), sweepInfo{phaseIndex}.batchSize, ...
+        sweepInfo{phaseIndex}); %#ok<AGROW>
+    timingRows(end + 1) = timing_row('real_pressure_all', NaN, NaN, ...
+        nBubbles, size(allPressure, 2), NaN, allSweepSeconds(phaseIndex), ...
+        allSweepInfo{phaseIndex}.batchSize, ...
+        allSweepInfo{phaseIndex}); %#ok<AGROW>
+end
 
 details.selected_indices = selectedIndices;
 details.cpu_info = cpuInfo;
@@ -632,8 +737,8 @@ rows = repmat(template, 0, 1);
 end
 
 function rows = empty_solver_rows()
-template = struct('reference', {{}}, 'frequency_hz', 0, ...
-    'pressure_pa', 0, 'radius_m', 0, ...
+template = struct('reference', {{}}, 'rk4_max_phase_step', 0, ...
+    'frequency_hz', 0, 'pressure_pa', 0, 'radius_m', 0, ...
     'radius_excursion_relative_l2', 0, 'radius_excursion_max_abs', 0, ...
     'rdot_relative_l2', 0, 'rdot_max_abs_m_per_s', 0, ...
     'mass_source_relative_l2', 0, 'mass_source_max_abs', 0, ...
@@ -643,14 +748,19 @@ template = struct('reference', {{}}, 'frequency_hz', 0, ...
     'rk4_convergence_refined_phase_step', 0, ...
     'rk4_convergence_radius_relative_l2', 0, ...
     'rk4_convergence_rdot_relative_l2', 0, ...
-    'rk4_convergence_mass_source_relative_l2', 0);
+    'rk4_convergence_mass_source_relative_l2', 0, ...
+    'sweep_finest_phase_step', 0, ...
+    'sweep_radius_excursion_relative_l2', 0, ...
+    'sweep_mass_source_relative_l2', 0);
 rows = repmat(template, 0, 1);
 end
 
 function rows = empty_real_pressure_rows()
-template = struct('reference', {{}}, 'capture_index', 0, 'radius_m', 0, ...
+template = struct('reference', {{}}, 'rk4_max_phase_step', 0, ...
+    'capture_index', 0, 'radius_m', 0, ...
     'mass_source_relative_l2', 0, 'mass_source_max_abs', 0, ...
-    'peak_time_difference_s', 0, 'gpu_all_finite', false);
+    'peak_time_difference_s', 0, 'gpu_all_finite', false, ...
+    'sweep_finest_phase_step', 0, 'sweep_mass_source_relative_l2', 0);
 rows = repmat(template, 0, 1);
 end
 
@@ -694,7 +804,8 @@ plot(details.response.t * 1e6, details.response.cpu, ...
     'k-', 'LineWidth', 1.5); hold on
 plot(details.response.t * 1e6, details.response.gpu, 'r--')
 xlabel('Time (\mus)'); ylabel('(R - R_0) / R_0')
-legend('CPU ode45/PCHIP', 'GPU RK4/linear', 'Location', 'best'); grid on
+legend('CPU ode45', sprintf('GPU RK4 (%.3g rad/substep)', ...
+    details.response.phase_step), 'Location', 'best'); grid on
 title('2.14 \mum bubble response at 18 MHz, 200 kPa')
 exportgraphics(figureHandle, outputPath, 'Resolution', 160); close(figureHandle)
 end

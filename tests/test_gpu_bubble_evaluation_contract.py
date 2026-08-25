@@ -227,3 +227,73 @@ def test_readme_documents_the_single_colab_cell_and_evidence_boundary():
     assert "run_colab_evaluation.py" in readme
     assert "A100" in readme
     assert "does not define scientific pass/fail thresholds" in readme
+
+
+def evaluator_source():
+    return (
+        ROOT
+        / "evaluation"
+        / "gpu_bubble_solver"
+        / "run_gpu_bubble_solver_evaluation.m"
+    ).read_text()
+
+
+def test_phase_step_is_a_swept_axis_not_a_single_settings_value():
+    """The RK4 phase budget is the fixed-step solver's only accuracy control,
+    and the Aug 23 tightening from ~0.75 to 0.25 rad cost 18x in run time. The
+    evaluator has to be able to price that trade, which means running the same
+    case at several budgets rather than at whatever the settings happen to say.
+    """
+    source = evaluator_source()
+
+    assert "addParameter(parser, 'PhaseSteps', []);" in source
+    assert "function phaseSteps = resolve_phase_step_sweep(" in source
+    # Absent the parameter, a plain run behaves exactly as before.
+    assert "phaseSteps = settingsPhaseStep;" in source
+    assert "gpuBubbleEvaluation:InvalidPhaseSteps" in source
+
+
+def test_sweep_is_ordered_so_the_finest_step_is_the_reference():
+    source = evaluator_source()
+
+    assert "phaseSteps = unique(double(requested(:)'));" in source
+    assert "finestResponse = sweepResponses{1};" in source
+    assert "finestMassSource = sweepMassSource{1};" in source
+
+
+def test_both_arms_sweep_the_phase_step():
+    """The analytic arm prices accuracy against the CPU reference; the real
+    pressure arm prices it at the bubble count and sample count a production
+    frame actually uses. A sweep of only the first would not answer the
+    production question."""
+    source = evaluator_source()
+
+    assert "run_analytic_evaluation(frequencies, pressures, radii, ...\n" \
+           "    samplingRate, gpuRepeats, phaseSteps," in source
+    assert "run_real_pressure_evaluation(capture, gpuRepeats, phaseSteps);" in source
+    assert "sweptPulse.rk4MaxPhaseStep = phaseSteps(phaseIndex);" in source
+    assert "sweptConfig.GPURK4MaxPhaseStep = phaseSteps(phaseIndex);" in source
+
+
+def test_swept_rows_record_which_phase_step_produced_them():
+    """A sweep whose rows cannot be told apart is not a sweep."""
+    source = evaluator_source()
+
+    assert "row.rk4_max_phase_step = phaseStep;" in source
+    assert "row.rk4_max_phase_step = phaseSteps(phaseIndex);" in source
+    assert "'rk4_max_phase_step', 0, ...\n    'frequency_hz'" in source
+    # Error against the finest step isolates RK4 discretization from the
+    # precision and interpolant differences that the CPU comparison mixes in.
+    assert "row.sweep_mass_source_relative_l2" in source
+    assert "row.sweep_radius_excursion_relative_l2" in source
+    assert "'sweep_finest_phase_step', 0" in source
+
+
+def test_each_swept_point_is_timed_after_a_warm_up():
+    """Kernel compilation on the first launch would otherwise be charged to
+    whichever phase step happened to run first."""
+    source = evaluator_source()
+
+    assert source.count("gpuDurations(repeatIndex) = toc(gpuTimer);") == 2
+    assert "allSweepSeconds(phaseIndex) = median(allGpuDurations);" in source
+    assert "sweepSeconds(phaseIndex) = median(gpuDurations);" in source
