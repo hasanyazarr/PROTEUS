@@ -129,6 +129,8 @@ rawVelocities = zeros(NPulses*NFrames, NBubbles,3);
 streamNumbers = zeros(NPulses*NFrames, NBubbles);
 tileIDs       = zeros(NPulses*NFrames, NBubbles);
 radii         = zeros(NPulses*NFrames, NBubbles);
+bubbleIndexes = zeros(NPulses*NFrames, NBubbles);
+trackIDs      = zeros(NPulses*NFrames, NBubbles);
 
 t1 = tic;
 if showStreamlines; h = figure(); end
@@ -146,6 +148,8 @@ if useparfor
     streamNumbers_cell = cell(1, NBubbles);
     tileIDs_cell       = cell(1, NBubbles);
     radii_cell         = cell(1, NBubbles);
+    bubbleIndexes_cell = cell(1, NBubbles);
+    trackIDs_cell      = cell(1, NBubbles);
 
     parfor n = 1:NBubbles
 
@@ -159,11 +163,13 @@ if useparfor
             rawVelocities_cell{ n}, ...
             streamNumbers_cell{ n}, ...
             tileIDs_cell{       n}, ...
-            radii_cell{         n}  ...
+            radii_cell{         n}, ...
+            bubbleIndexes_cell{ n}, ...
+            trackIDs_cell{      n}  ...
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, TileCfg, n);
+            VELOCITY_SCALE, TileCfg, n, n, NBubbles);  % tile seed, slot
     end
 
     % Assign the streamline values in the cells to the matrices:
@@ -174,6 +180,8 @@ if useparfor
         streamNumbers(:, n)   = streamNumbers_cell{ n};
         tileIDs(      :, n)   = tileIDs_cell{       n};
         radii(        :, n)   = radii_cell{         n};
+        bubbleIndexes(:, n)   = bubbleIndexes_cell{ n};
+        trackIDs(     :, n)   = trackIDs_cell{      n};
     end
     
 else
@@ -194,11 +202,13 @@ else
             rawVelocities( :, n, :), ...
             streamNumbers( :, n), ...
             tileIDs(       :, n), ...
-            radii(         :, n) ...
+            radii(         :, n), ...
+            bubbleIndexes( :, n), ...
+            trackIDs(      :, n) ...
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, TileCfg, n);
+            VELOCITY_SCALE, TileCfg, n, n, NBubbles);  % tile seed, slot
 
     end
     
@@ -219,6 +229,8 @@ rawVelocities = reshape(rawVelocities, NPulses, NFrames, NBubbles, 3);
 streamNumbers = reshape(streamNumbers, NPulses, NFrames, NBubbles);
 tileIDs       = reshape(tileIDs,       NPulses, NFrames, NBubbles);
 radii         = reshape(radii,         NPulses, NFrames, NBubbles);
+bubbleIndexes = reshape(bubbleIndexes, NPulses, NFrames, NBubbles);
+trackIDs      = reshape(trackIDs,      NPulses, NFrames, NBubbles);
 
 if ~exist([PATHS.GroundTruthPath filesep savefolder],'dir')
     mkdir([PATHS.GroundTruthPath filesep savefolder]);
@@ -240,6 +252,17 @@ FlowSimulationParameters.Velocity.EffectiveUnits = ...
     'm/s after Velocity.Scale, matching integrated point displacement';
 FlowSimulationParameters.Velocity.LabelFieldDefinition = ...
     'Frame.PulseN.Velocity is effective scaled velocity; Frame.PulseN.RawVelocity is unscaled CFD velocity in the same coordinate frame.';
+FlowSimulationParameters.Identity.TrackIDFormula = ...
+    'bubbleIndex + NBubbles*(streamCount - 1)';
+FlowSimulationParameters.Identity.Definition = ...
+    ['Frame.PulseN.BubbleIndex is the tracking slot, constant across ' ...
+     'frames. A slot is reseeded on a new streamline whenever its bubble ' ...
+     'leaves the vessel, and StreamNumber counts those reseeds within the ' ...
+     'slot, so (BubbleIndex, StreamNumber) identifies one continuous ' ...
+     'track. TrackID is that pair folded into one number and is the field ' ...
+     'to group by. Neither StreamNumber nor TileID is unique on its own: ' ...
+     'every slot starts at StreamNumber 1, and TileID is shared whenever ' ...
+     'tiling is disabled.'];
 FlowSimulationParameters.Tiling = TileCfg;
 FlowSimulationParameters.Tiling.Transforms = TileCfg.Transforms;
 FlowSimulationParameters.Seeding = SeedCfg;
@@ -260,6 +283,8 @@ for m = 1:NFrames
         Frame.(pulse).Radius       = reshape(radii(         n,m,:,:), NBubbles, 1);
         Frame.(pulse).StreamNumber = reshape(streamNumbers( n,m,:,:), NBubbles, 1);
         Frame.(pulse).TileID       = reshape(tileIDs(       n,m,:,:), NBubbles, 1);
+        Frame.(pulse).BubbleIndex  = reshape(bubbleIndexes( n,m,:,:), NBubbles, 1);
+        Frame.(pulse).TrackID      = reshape(trackIDs(      n,m,:,:), NBubbles, 1);
 
     end
     
@@ -272,9 +297,11 @@ end
 
 
 
-function [streamlines, velocities, rawVelocities, streamNumbers, tileIDs, radii] = ...
+function [streamlines, velocities, rawVelocities, streamNumbers, tileIDs, ...
+    radii, bubbleIndexes, trackIDs] = ...
     track_bubble(Microbubble, Acquisition, Grid, vtuStruct, inlet, ...
-    odefun, options, showStreamlines, VELOCITY_SCALE, TileCfg, initialTileID)
+    odefun, options, showStreamlines, VELOCITY_SCALE, TileCfg, ...
+    initialTileID, bubbleIndex, NBubbles)
 
 %--------------------------------------------------------------------------
 % GET USER PARAMETERS
@@ -305,6 +332,8 @@ rawVelocities = zeros(NPulses*NFrames,1,3);
 streamNumbers = zeros(NPulses*NFrames,1,1);
 tileIDs       = zeros(NPulses*NFrames,1,1);
 radii         = zeros(NPulses*NFrames,1,1);
+bubbleIndexes = zeros(NPulses*NFrames,1,1);
+trackIDs      = zeros(NPulses*NFrames,1,1);
 
 % Sample the first streamline tile (per-streamline transform) and produce
 % the corresponding tiled odefun, event handler, and start position.
@@ -351,6 +380,13 @@ while max(t)<max(acquisitionTimes)
     streamlines(I_acquisition, 1,:) = positions(I,:);
     streamNumbers(I_acquisition, 1) = streamCount;
     tileIDs(I_acquisition, 1) = tileID;
+
+    % Identity. Slots run under parfor, so the track id has to be a formula
+    % over values this worker already holds rather than a shared counter.
+    % bubbleIndex spans 1..NBubbles and streamCount starts at 1, so the
+    % products never collide.
+    bubbleIndexes(I_acquisition, 1) = bubbleIndex;
+    trackIDs(I_acquisition, 1) = bubbleIndex + NBubbles*(streamCount - 1);
 
     % Get the velocities at the microbubble positions. Map the tiled
     % positions back to canonical vessel coords for the lookup, then rotate

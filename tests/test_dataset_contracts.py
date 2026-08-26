@@ -42,6 +42,29 @@ def test_generate_streamlines_saves_reproducible_velocity_metadata():
     assert "FlowSimulationParameters.VelocityScale = VELOCITY_SCALE" in src
 
 
+def test_generate_streamlines_writes_a_per_bubble_identity():
+    """Every bubble slot is tracked independently and reseeded when it leaves
+    the vessel, so (slot, StreamNumber) already identifies a track. The slot
+    was never written, which is why every motion metric in the audit came back
+    unmeasurable on (StreamNumber, TileID) alone."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "Frame.(pulse).BubbleIndex" in src
+    assert "Frame.(pulse).TrackID" in src
+    assert "bubbleIndexes" in src
+    assert "trackIDs" in src
+
+
+def test_track_ids_are_unique_without_a_shared_counter():
+    """Slots are tracked under parfor, so the identity has to be a formula
+    over values each worker already has, not a counter."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "bubbleIndex + NBubbles*(streamCount - 1)" in src
+    assert "FlowSimulationParameters.Identity.TrackIDFormula" in src
+    assert "FlowSimulationParameters.Identity.Definition" in src
+
+
 def test_acoustic_simulation_rejects_unmatched_tiled_trajectories():
     src = read("acoustic-module/main_RF.m")
 
