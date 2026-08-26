@@ -20,44 +20,14 @@ def test_load_rf_data_returns_frame_identity_and_pulse_metadata():
     assert "PulseInfo.CombinationFormula" in src
 
 
-def test_process_run_uses_source_frame_numbers_for_gt_export():
-    src = read("scripts/process_run.m")
-
-    assert "[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo] = load_RF_data" in src
-    assert "source_frame = sourceFrameNumbers(iframe);" in src
-    assert "source_frame, npad_gt" in src
-    assert "sample_metadata.source_frame_number" in src
-    assert "metadata.source_frame_numbers" in src
-
-
 def test_process_run_records_split_aware_preprocessing_state():
     src = read("scripts/process_run.m")
 
+    assert "[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo] = load_RF_data" in src
     assert "fit_frame_mask" in src
     assert "PreprocessingState.SVDFitFrameNumbers" in src
     assert "PreprocessingState.NormalizationMode" in src
     assert "PreprocessingState.NormalizationReference" in src
-    assert "metadata.preprocessing = PreprocessingState" in src
-
-
-def test_process_run_exports_pulse_aware_labels():
-    src = read("scripts/process_run.m")
-
-    assert "pulseInfo.PulseIDsUsed" in src
-    assert "PulseLabels" in src
-    assert "combined_gt_coords_px" in src
-    assert "LabelPulsePolicy" in src
-
-
-def test_process_run_preserves_label_validity_and_overlap_instances():
-    src = read("scripts/process_run.m")
-
-    assert "all_gt_coords_mm" in src
-    assert "label_valid" in src
-    assert "drop_reason" in src
-    assert "instance_targets" in src
-    assert "hr_frame_sum" in src
-    assert "DroppedLabelCountsByReason" in src
 
 
 def test_generate_streamlines_saves_reproducible_velocity_metadata():
@@ -78,21 +48,13 @@ def test_acoustic_simulation_rejects_unmatched_tiled_trajectories():
     assert "assert_tiling_metadata_matches" in src
 
 
-def test_legacy_dataset_export_delegates_to_process_run():
-    src = read("scripts/dataset_export.m")
-
-    assert "function dataset_export" in src
-    assert "process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER" in src
-    assert "PREPROCESSING_OPTIONS" in src
-
-
-def test_process_run_requires_explicit_preprocessing_for_dataset_export():
+def test_process_run_validates_the_preprocessing_split_policy():
     src = read("scripts/process_run.m")
 
-    assert "process_run:MissingPreprocessingOptions" in src
     assert "SplitMode" in src
     assert "frame_level" in src
     assert "case_level" in src
+    assert "process_run:InvalidSplitMode" in src
     assert "process_run:FrameLevelRequiresFitFrames" in src
 
 
@@ -101,23 +63,10 @@ def test_process_run_uses_explicit_svd_policy_not_hidden_constant():
 
     assert "SVD_CUTOFF       = 2" not in src
     assert "PreprocessingState.SVD.Mode" in src
-    assert "PreprocessingState.SVD.SelectedCutoff" in src
+    assert "[n_remove, PreprocessingState.SVD] = select_svd_cutoff(" in src
+    assert "SVDState.SelectedCutoff = cutoff;" in src
     assert "adaptive_energy" in src
     assert "select_svd_cutoff" in src
-
-
-def test_process_run_records_reproducibility_hashes_and_pipeline_state():
-    src = read("scripts/process_run.m")
-
-    assert "metadata.Hashes.SettingsFile" in src
-    assert "metadata.Hashes.GTFlowSimulationParameters" in src
-    assert "metadata.Hashes.RFSourceFiles" in src
-    assert "metadata.Hashes.STLFile" in src
-    assert "metadata.Hashes.VTUFile" in src
-    assert "metadata.Hashes.GeometryPropertiesFile" in src
-    assert "metadata.Pipeline.GitCommit" in src
-    assert "metadata.Pipeline.GitDirty" in src
-    assert "metadata.Pipeline.ExportTimestamp" in src
 
 
 def test_file_hash_helper_exists():
@@ -151,15 +100,6 @@ def test_define_medium_closes_rotate_helper_before_tiling_helpers():
     between_helpers = src[rotate_idx:apply_idx]
 
     assert between_helpers.splitlines().count("end") >= 2
-
-
-def test_label_policy_is_configurable_and_frame_counts_are_saved():
-    src = read("scripts/process_run.m")
-
-    assert "LabelPolicy.VisibilityThreshold" in src
-    assert "PREPROCESSING_OPTIONS.LabelPolicy" in src
-    assert "LabelCountsByPulseAndReason" in src
-    assert "sample_metadata.LabelCountsByPulseAndReason" in src
 
 
 def test_define_sensor_mb_all_uses_current_acquisition_window():
@@ -212,3 +152,14 @@ def test_v4_notebook_normalizes_every_settings_struct_before_persisting():
     # The notebook must not carry its own copy of the function any more; the
     # tracked implementation is the one that has to run.
     assert "%%writefile /content/PROTEUS/normalize_settings_types.m" not in notebook
+
+
+def test_process_run_no_longer_exports_a_super_resolution_dataset():
+    """The SR dataset export was removed; runs write visualizations only."""
+    src = read("scripts/process_run.m")
+
+    assert "DATASET_OUT" not in src
+    assert "hr_frame" not in src
+    assert "instance_targets" not in src
+    assert "gauss_point" not in src
+    assert not (ROOT / "scripts/dataset_export.m").exists()

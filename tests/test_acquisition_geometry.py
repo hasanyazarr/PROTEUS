@@ -96,7 +96,7 @@ def test_pixel_size_follows_the_centre_frequency():
 
 
 def test_transform_matches_the_matlab_composition():
-    """pts - bbox_center, rotate, + center -- the order load_gt_for_export uses."""
+    """pts - bbox_center, rotate, + center -- the order load_gt_frame uses."""
     geometry = AcquisitionGeometry(nine_l_settings())
     world = np.array([[0.01, 0.02, 0.03], [0.0, 0.0, 0.0]])
 
@@ -151,7 +151,7 @@ def test_classification_separates_the_two_geometric_reasons():
 
 def test_out_of_fov_wins_over_out_of_plane():
     """A point outside the image is out of the field of view whatever its
-    elevation, the order classify_label applies."""
+    elevation, the order the geometric label rules apply."""
     geometry = AcquisitionGeometry(nine_l_settings())
     far = np.linalg.inv(geometry.rotation) @ (
         np.array([0.2, 0.0, 0.05]) - geometry.center) + geometry.bbox_center

@@ -12,13 +12,12 @@ domain, or centre frequency needs no edit.
 
 The MATLAB source of each rule:
 
-    transform    process_run.m, load_gt_for_export
+    transform    process_run.m, load_gt_frame
     grid         process_run.m, the x_lat / z_ax colon expressions
-    label rules  process_run.m, classify_label
 
-``weak_response``, the fourth label rule, needs a beamformed frame and so is
-not reproducible before the RF run; these diagnostics cover the two rules that
-depend only on geometry.
+The label rules these diagnostics apply (in field of view, in plane) are the
+geometry-only ones; they used to mirror the dataset export's label
+classification, which was removed with the SR export on 2026-08-26.
 
 Kept compatible with Python 3.9 so it runs on this workstation as well as on
 Colab.
@@ -119,7 +118,7 @@ class AcquisitionGeometry:
         """World points (N x 3, metres) to image millimetres.
 
         Returns an N x 3 array of (axial, lateral, elevation), the same three
-        components ``load_gt_for_export`` takes out of the rotated points.
+        components ``load_gt_frame`` takes out of the rotated points.
         """
         points_world = np.atleast_2d(np.asarray(points_world, dtype=float))
         if points_world.shape[1] != 3:
@@ -152,7 +151,7 @@ class AcquisitionGeometry:
                           elevation_filter_mm: float) -> np.ndarray:
         """Label points already in image millimetres.
 
-        These are the geometric two of ``classify_label``'s four outcomes.
+        These are the geometry-only label outcomes.
         'in_frame' is not the same as MATLAB's 'valid': a point in frame can
         still be dropped as a weak response once the frame is beamformed.
         """
