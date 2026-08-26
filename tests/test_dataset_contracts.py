@@ -48,6 +48,43 @@ def test_acoustic_simulation_rejects_unmatched_tiled_trajectories():
     assert "assert_tiling_metadata_matches" in src
 
 
+def test_process_run_derives_the_image_grid_from_the_vessel_box():
+    """The grid used to be Geometry.Domain, which is sized by the transducer
+    and the medium, not by the vessel. On 9L-D renal_tree that put ~90% of the
+    pixels where no vessel can be."""
+    src = read("scripts/process_run.m")
+
+    assert "select_image_roi(" in src
+    assert "Geom.BoundingBox.Diagonal" in src
+    assert "abs(double(Geom.Rotation))" in src
+    assert "x_lat = roi_x(1) : pixelSize : roi_x(2);" in src
+    assert "z_ax  = roi_z(1) : pixelSize : roi_z(2);" in src
+    # The old rule, gone: a domain-wide grid anchored at the transducer face.
+    assert "width = D.Ymax - D.Ymin;" not in src
+    assert "z_ax  = 0        : pixelSize : depth;" not in src
+
+
+def test_process_run_clamps_the_image_roi_to_the_simulated_domain():
+    """Nothing outside Geometry.Domain was simulated, so the vessel box may
+    not reach past it."""
+    src = read("scripts/process_run.m")
+
+    assert "min(roi_z(2), double(D.Xmax))" in src
+    assert "max(roi_x(1), double(D.Ymin))" in src
+    assert "process_run:EmptyImageROI" in src
+
+
+def test_process_run_records_the_image_roi_it_used():
+    src = read("scripts/process_run.m")
+
+    assert "PreprocessingState.ImageROI" in src
+    assert "ROIState.Mode = 'vessel_bounding_box';" in src
+    assert "ROIState.Mode = 'explicit';" in src
+    assert "ROIState.MarginWavelengths" in src
+    assert "ROIState.VesselBoxDepth" in src
+    assert "process_run:InvalidImageROI" in src
+
+
 def test_process_run_validates_the_preprocessing_split_policy():
     src = read("scripts/process_run.m")
 

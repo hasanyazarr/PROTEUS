@@ -2,8 +2,13 @@
 
 The notebook used to hard-code the transform and the field of view. Those
 constants were correct for one L22 config and silently wrong for every other,
-so these tests pin two things: that the derivation reproduces the known-good
-L22 numbers exactly, and that it moves when the settings move.
+so these tests pin that the derivation moves when the settings move.
+
+The beamforming grid follows the vessel bounding box, not the simulation
+domain. The domain is sized by the transducer surface and the far edge of the
+medium, so a domain-sized grid put ~90 % of every pixel outside any vessel on
+the 9L-D renal_tree configs. These tests pin the vessel-box rule, the domain
+clamp that still bounds it, and the explicit override.
 """
 
 import sys
@@ -22,6 +27,7 @@ from analysis.acquisition_geometry import (  # noqa: E402
 
 # The renal_tree bounding box, shared by every config that seeds in it.
 BBOX_CENTER = [0.00808885, 0.00695069, 0.01109843]
+BBOX_DIAGONAL = [0.01335366, 0.00950394, 0.01841407]
 ROTATION = [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
 
 
@@ -31,7 +37,9 @@ def settings(*, center_x, y_half, x_max, f0, pitch, n_elements,
     return {
         "Geometry": SimpleNamespace(
             Rotation=np.array(ROTATION),
-            BoundingBox=SimpleNamespace(Center=np.array(BBOX_CENTER)),
+            BoundingBox=SimpleNamespace(
+                Center=np.array(BBOX_CENTER),
+                Diagonal=np.array(BBOX_DIAGONAL)),
             Center=np.array([center_x, 0.0, 0.0]),
             Domain=SimpleNamespace(
                 Xmin=-0.0005811320754716982, Xmax=x_max,
@@ -65,12 +73,10 @@ def equivalent_translation_mm(geometry):
     return (geometry.center - geometry.rotation @ geometry.bbox_center) * 1e3
 
 
-def test_reproduces_the_hardcoded_l22_constants():
-    """These are the numbers the notebook carried as literals."""
+def test_reproduces_the_hardcoded_l22_translation():
+    """The transform constant the notebook carried as a literal."""
     geometry = AcquisitionGeometry(l22_settings())
 
-    assert geometry.lateral_limit_mm == pytest.approx(6.97, abs=5e-3)
-    assert geometry.axial_limit_mm == pytest.approx(11.99, abs=5e-3)
     assert equivalent_translation_mm(geometry) == pytest.approx(
         [26.305, 8.089, -6.951], abs=5e-3)
 
@@ -79,11 +85,72 @@ def test_the_same_constants_are_wrong_for_a_different_probe():
     """The failure the hard-coded version could not see."""
     geometry = AcquisitionGeometry(nine_l_settings())
 
-    assert geometry.lateral_limit_mm == pytest.approx(22.62, abs=0.01)
-    assert geometry.axial_limit_mm == pytest.approx(43.99, abs=0.01)
     # 19 mm of axial offset, the difference in Geometry.Center.
     assert equivalent_translation_mm(geometry)[0] == pytest.approx(
         45.305, abs=5e-3)
+
+
+def test_the_grid_follows_the_vessel_not_the_domain():
+    """The 9L-D domain is 44 x 45.3 mm; the vessel occupies a tenth of it."""
+    geometry = AcquisitionGeometry(nine_l_settings())
+
+    # Vessel box, imaging frame: axial 25.000..43.414, lateral +-6.677.
+    assert geometry.vessel_box_mm["axial"] == pytest.approx(
+        (25.000, 43.414), abs=5e-3)
+    assert geometry.vessel_box_mm["lateral"] == pytest.approx(
+        (-6.677, 6.677), abs=5e-3)
+
+    # Grid: that box plus a 5 lambda margin, clamped by the domain.
+    assert geometry.axial_range_mm == pytest.approx(
+        (23.5472, 43.9952), abs=5e-4)
+    assert geometry.lateral_range_mm == pytest.approx(
+        (-8.1297, 8.1297), abs=5e-4)
+    assert geometry.image_shape == (352, 280)
+
+
+def test_the_grid_no_longer_starts_at_the_transducer_face():
+    """The old rule always began at 0, which is where the transmit transient
+    dominates and where no vessel can be."""
+    geometry = AcquisitionGeometry(nine_l_settings())
+
+    assert geometry.z_ax_mm[0] > 20.0
+
+
+def test_the_domain_still_clamps_the_grid():
+    """The L22 vessel box runs to 24.4 mm but only 12 mm was simulated."""
+    geometry = AcquisitionGeometry(l22_settings())
+
+    assert geometry.vessel_box_mm["axial"][1] == pytest.approx(24.414, abs=5e-3)
+    assert geometry.axial_range_mm[1] == pytest.approx(11.995, abs=5e-4)
+    # Lateral is clamped by the domain on both sides here.
+    assert geometry.lateral_range_mm == pytest.approx(
+        (-6.975, 6.975), abs=5e-4)
+
+
+def test_an_explicit_roi_overrides_the_vessel_box():
+    geometry = AcquisitionGeometry(
+        nine_l_settings(), image_roi={"Depth": (0.030, 0.035),
+                                      "Lateral": (-0.002, 0.002)})
+
+    assert geometry.axial_range_mm == pytest.approx((30.0, 35.0), abs=5e-4)
+    assert geometry.lateral_range_mm == pytest.approx((-2.0, 2.0), abs=5e-4)
+    assert geometry.image_roi_mode == "explicit"
+
+
+def test_an_explicit_roi_is_still_clamped_to_the_domain():
+    geometry = AcquisitionGeometry(
+        nine_l_settings(), image_roi={"Depth": (-0.010, 0.900),
+                                      "Lateral": (-0.900, 0.900)})
+
+    assert geometry.axial_range_mm == pytest.approx((0.0, 43.9952), abs=5e-4)
+    assert geometry.lateral_range_mm[0] == pytest.approx(-22.6511, abs=5e-4)
+
+
+def test_an_empty_roi_is_rejected():
+    with pytest.raises(ValueError, match="empty"):
+        AcquisitionGeometry(
+            nine_l_settings(), image_roi={"Depth": (0.100, 0.200),
+                                          "Lateral": (-0.002, 0.002)})
 
 
 def test_pixel_size_follows_the_centre_frequency():
@@ -137,16 +204,18 @@ def test_classification_separates_the_two_geometric_reasons():
         return np.linalg.inv(geometry.rotation) @ (
             image - geometry.center) + geometry.bbox_center
 
+    # 33 mm is inside the vessel-box grid; 20 mm no longer is.
     points = np.vstack([
-        world_of(20.0, 0.0, 0.0),      # in frame
-        world_of(20.0, 0.0, 5.0),      # in the image, off the plane
+        world_of(33.0, 0.0, 0.0),      # in frame
+        world_of(33.0, 0.0, 5.0),      # in the image, off the plane
         world_of(200.0, 0.0, 0.0),     # past the far edge
-        world_of(20.0, 100.0, 0.0),    # past the lateral edge
+        world_of(33.0, 100.0, 0.0),    # past the lateral edge
+        world_of(20.0, 0.0, 0.0),      # shallower than the grid now starts
     ])
 
     reasons = geometry.classify(points, elevation_filter_mm=1.0)
     assert list(reasons) == [
-        "in_frame", "out_of_plane", "out_of_fov", "out_of_fov"]
+        "in_frame", "out_of_plane", "out_of_fov", "out_of_fov", "out_of_fov"]
 
 
 def test_out_of_fov_wins_over_out_of_plane():
@@ -205,15 +274,19 @@ real_settings = pytest.mark.skipif(
 
 
 @real_settings
-@pytest.mark.parametrize("name, lateral, axial", [
-    ("GUI_output_parameters_v7.mat", 22.62, 43.99),
-    ("GUI_output_parameters_v9e_L22.mat", 6.97, 11.99),
+@pytest.mark.parametrize("name, axial, lateral, shape", [
+    ("GUI_output_parameters_v7.mat",
+     (23.5472, 43.9952), (-8.1297, 8.1297), (352, 280)),
+    ("GUI_output_parameters_v9e_L22.mat",
+     (5.4867, 12.0000), (-6.9711, 6.9711), (318, 680)),
 ])
-def test_real_settings_give_the_expected_field_of_view(name, lateral, axial):
+def test_real_settings_give_the_expected_field_of_view(
+        name, axial, lateral, shape):
     geometry = AcquisitionGeometry.from_settings(str(CONFIGS / name))
 
-    assert geometry.lateral_limit_mm == pytest.approx(lateral, abs=0.01)
-    assert geometry.axial_limit_mm == pytest.approx(axial, abs=0.01)
+    assert geometry.axial_range_mm == pytest.approx(axial, abs=5e-4)
+    assert geometry.lateral_range_mm == pytest.approx(lateral, abs=5e-4)
+    assert geometry.image_shape == shape
 
 
 def test_from_settings_rejects_a_file_that_is_not_settings(tmp_path):

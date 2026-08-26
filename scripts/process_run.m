@@ -26,6 +26,8 @@ function process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, ...
 %                   SplitID: label for the preprocessing fit split.
 %                   NormalizationMode: 'fit_frames_global_max' or 'per_frame'.
 %                   SVD.Cutoff or SVD.Mode = 'adaptive_energy'.
+%                   ImageROI: struct with Depth and Lateral, each [min max] in
+%                   metres, overriding the vessel-box grid. Optional.
 
 if nargin < 4 || isempty(VIZ_OUT)
     error('process_run:MissingVizOut', 'VIZ_OUT is required -- nothing to do.');
@@ -39,6 +41,7 @@ if nargin < 7 || isempty(PREPROCESSING_OPTIONS)
 end
 
 DYNRANGE_VIZ = 60;   % dB, display window for bmode_gt / bmode_clean / video
+ROI_MARGIN_LAMBDA = 5;   % wavelengths of margin around the vessel bounding box
 
 %==========================================================================
 % LOAD SETTINGS & RF
@@ -91,13 +94,14 @@ f0  = Transmit.CenterFrequency;
 lam = c / f0;
 pixelSize = lam / 5;
 
-D = Geometry.Domain;
-width = D.Ymax - D.Ymin;
-depth = D.Xmax;
-x_lat = -width/2 : pixelSize : width/2;
-z_ax  = 0        : pixelSize : depth;
+[roi_z, roi_x, PreprocessingState.ImageROI] = select_image_roi(...
+    PREPROCESSING_OPTIONS, Geometry, lam, ROI_MARGIN_LAMBDA);
+x_lat = roi_x(1) : pixelSize : roi_x(2);
+z_ax  = roi_z(1) : pixelSize : roi_z(2);
 Nx = length(x_lat);
 Nz = length(z_ax);
+fprintf('Image ROI (%s): depth %.2f-%.2f mm, lateral %.2f-%.2f mm\n', ...
+    PreprocessingState.ImageROI.Mode, roi_z*1e3, roi_x*1e3);
 
 % Time corrections
 IR     = Transducer.ReceiveImpulseResponse;
@@ -383,6 +387,68 @@ PreprocessingState.SVDFitFrameNumbers = sourceFrameNumbers(fit_frame_mask);
 PreprocessingState.SVDFitScope = 'specified_source_frames';
 PreprocessingState.NormalizationMode = norm_mode;
 PreprocessingState.NormalizationReference = [];
+end
+
+
+function [roi_z, roi_x, ROIState] = select_image_roi(...
+    options, Geom, lam, margin_lambda)
+%SELECT_IMAGE_ROI Axial and lateral extent of the beamformed image, in metres.
+%
+% The grid used to follow Geometry.Domain, which is sized by the transducer
+% surface and the far edge of the medium rather than by the vessel. On the
+% 9L-D renal_tree configs that left about 90% of every pixel where no vessel
+% can be. The vessel bounding box is already in the settings, so derive the
+% grid from it and keep the domain only as a clamp: nothing outside it was
+% simulated.
+%
+% abs(Rotation) turns the box half-extents into the half-extents of its
+% axis-aligned envelope, which is exact for the signed permutations the
+% configs use and correct for any rotation.
+
+% Rotation is stored as int16 in the settings snapshots. MATLAB refuses to
+% multiply an integer matrix by a double one, and normalize_settings_types
+% only runs on the copy the notebook writes, so cast here rather than depend
+% on it.
+D    = Geom.Domain;
+half = abs(double(Geom.Rotation)) * (double(Geom.BoundingBox.Diagonal(:)) / 2);
+ctr  = double(Geom.Center(:));
+
+if isfield(options, 'ImageROI') && ~isempty(options.ImageROI)
+    roi = options.ImageROI;
+    if ~isstruct(roi) || ~isfield(roi, 'Depth') || ~isfield(roi, 'Lateral')
+        error('process_run:InvalidImageROI', ...
+            ['PREPROCESSING_OPTIONS.ImageROI needs Depth and Lateral, ' ...
+             'each [min max] in metres.']);
+    end
+    roi_z = sort(reshape(double(roi.Depth), 1, []));
+    roi_x = sort(reshape(double(roi.Lateral), 1, []));
+    if numel(roi_z) ~= 2 || numel(roi_x) ~= 2
+        error('process_run:InvalidImageROI', ...
+            'ImageROI.Depth and ImageROI.Lateral must each hold two values.');
+    end
+    ROIState.Mode = 'explicit';
+    ROIState.MarginWavelengths = [];
+else
+    margin = margin_lambda * lam;
+    roi_z = [ctr(1) - half(1) - margin, ctr(1) + half(1) + margin];
+    roi_x = [ctr(2) - half(2) - margin, ctr(2) + half(2) + margin];
+    ROIState.Mode = 'vessel_bounding_box';
+    ROIState.MarginWavelengths = margin_lambda;
+end
+
+roi_z = [max(roi_z(1), 0),              min(roi_z(2), double(D.Xmax))];
+roi_x = [max(roi_x(1), double(D.Ymin)), min(roi_x(2), double(D.Ymax))];
+if roi_z(2) <= roi_z(1) || roi_x(2) <= roi_x(1)
+    error('process_run:EmptyImageROI', ...
+        ['Image ROI is empty after clamping to the simulation domain ' ...
+         '(depth %.4f-%.4f m, lateral %.4f-%.4f m).'], ...
+        roi_z(1), roi_z(2), roi_x(1), roi_x(2));
+end
+
+ROIState.VesselBoxDepth   = [ctr(1) - half(1), ctr(1) + half(1)];
+ROIState.VesselBoxLateral = [ctr(2) - half(2), ctr(2) + half(2)];
+ROIState.DepthRange       = roi_z;
+ROIState.LateralRange     = roi_x;
 end
 
 

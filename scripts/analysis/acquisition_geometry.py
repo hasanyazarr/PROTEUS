@@ -13,7 +13,7 @@ domain, or centre frequency needs no edit.
 The MATLAB source of each rule:
 
     transform    process_run.m, load_gt_frame
-    grid         process_run.m, the x_lat / z_ax colon expressions
+    grid         process_run.m, select_image_roi and the x_lat / z_ax colons
 
 The label rules these diagnostics apply (in field of view, in plane) are the
 geometry-only ones; they used to mirror the dataset export's label
@@ -33,11 +33,17 @@ from scipy.io import loadmat
 # the endpoint. Mirror that so the grid lengths match element for element.
 _COLON_TOLERANCE = 1e-9
 
+# Margin added around the vessel bounding box, in wavelengths. Wide enough for
+# the point spread function tails of a bubble sitting on the edge of the
+# vessel; the lateral PSF is about 0.76 lambda at the 9L-D imaging depth.
+# Mirrors ROI_MARGIN_LAMBDA in process_run.m.
+IMAGE_ROI_MARGIN_LAMBDA = 5.0
+
 
 class AcquisitionGeometry:
     """The geometry of one acquisition, as the MATLAB pipeline sees it."""
 
-    def __init__(self, settings: Dict):
+    def __init__(self, settings: Dict, image_roi: Optional[Dict] = None):
         geom = settings["Geometry"]
         transducer = settings["Transducer"]
         transmit = settings["Transmit"]
@@ -46,6 +52,8 @@ class AcquisitionGeometry:
         self.rotation = np.asarray(geom.Rotation, dtype=float).reshape(3, 3)
         self.bbox_center = np.asarray(
             geom.BoundingBox.Center, dtype=float).reshape(3)
+        self.bbox_diagonal = np.asarray(
+            geom.BoundingBox.Diagonal, dtype=float).reshape(3)
         self.center = np.asarray(geom.Center, dtype=float).reshape(3)
 
         self.speed_of_sound = float(medium.SpeedOfSound)
@@ -60,12 +68,29 @@ class AcquisitionGeometry:
             "z_min": 1e3 * float(domain.Zmin), "z_max": 1e3 * float(domain.Zmax),
         }
 
-        # The beamforming grid: lateral spans the domain width centred on zero,
-        # axial runs from the transducer face to the far edge of the domain.
-        width_mm = self.domain_mm["y_max"] - self.domain_mm["y_min"]
-        depth_mm = self.domain_mm["x_max"]
-        self.x_lat_mm = _colon(-width_mm / 2, self.pixel_size_mm, width_mm / 2)
-        self.z_ax_mm = _colon(0.0, self.pixel_size_mm, depth_mm)
+        # The vessel bounding box in the imaging frame. |R| turns the box's
+        # half-extents into the half-extents of its axis-aligned envelope,
+        # which is exact for the signed permutations the configs use and
+        # correct for any rotation.
+        half_mm = 1e3 * (np.abs(self.rotation) @ (self.bbox_diagonal / 2))
+        centre_mm = 1e3 * self.center
+        self.vessel_box_mm = {
+            "axial": (centre_mm[0] - half_mm[0], centre_mm[0] + half_mm[0]),
+            "lateral": (centre_mm[1] - half_mm[1], centre_mm[1] + half_mm[1]),
+            "elevation": (centre_mm[2] - half_mm[2], centre_mm[2] + half_mm[2]),
+        }
+
+        # The beamforming grid follows that box, not the simulation domain.
+        # The domain is sized by the transducer surface and the far edge of the
+        # medium, so a domain-sized grid spends most of its pixels where no
+        # vessel can be. The domain survives only as a clamp: nothing outside
+        # it was simulated.
+        (self.axial_range_mm, self.lateral_range_mm,
+         self.image_roi_mode) = self._select_image_roi(image_roi)
+        self.x_lat_mm = _colon(self.lateral_range_mm[0], self.pixel_size_mm,
+                               self.lateral_range_mm[1])
+        self.z_ax_mm = _colon(self.axial_range_mm[0], self.pixel_size_mm,
+                              self.axial_range_mm[1])
 
         self.probe_type = str(transducer.Type)
         self.n_elements = int(transducer.NumberOfElements)
@@ -74,8 +99,44 @@ class AcquisitionGeometry:
         self.element_height_mm = 1e3 * float(transducer.ElementHeight)
         self.elevation_focus_mm = 1e3 * float(transducer.ElevationFocus)
 
+    def _select_image_roi(
+            self, image_roi: Optional[Dict]
+    ) -> Tuple[Tuple[float, float], Tuple[float, float], str]:
+        """Axial and lateral extent of the image, in millimetres.
+
+        Mirrors ``select_image_roi`` in process_run.m: the vessel box widened
+        by a fixed margin, or an explicit override, either way clamped to the
+        simulation domain.
+        """
+        if image_roi:
+            missing = [k for k in ("Depth", "Lateral") if k not in image_roi]
+            if missing:
+                raise ValueError(
+                    "image_roi needs Depth and Lateral in metres, missing "
+                    "{}".format(", ".join(missing)))
+            axial = sorted(1e3 * float(v) for v in image_roi["Depth"])
+            lateral = sorted(1e3 * float(v) for v in image_roi["Lateral"])
+            mode = "explicit"
+        else:
+            margin = IMAGE_ROI_MARGIN_LAMBDA * self.wavelength_mm
+            axial = [self.vessel_box_mm["axial"][0] - margin,
+                     self.vessel_box_mm["axial"][1] + margin]
+            lateral = [self.vessel_box_mm["lateral"][0] - margin,
+                       self.vessel_box_mm["lateral"][1] + margin]
+            mode = "vessel_bounding_box"
+
+        axial = (max(axial[0], 0.0), min(axial[1], self.domain_mm["x_max"]))
+        lateral = (max(lateral[0], self.domain_mm["y_min"]),
+                   min(lateral[1], self.domain_mm["y_max"]))
+        if axial[1] <= axial[0] or lateral[1] <= lateral[0]:
+            raise ValueError(
+                "image ROI is empty after clamping to the simulation domain: "
+                "axial {}, lateral {}".format(axial, lateral))
+        return axial, lateral, mode
+
     @classmethod
-    def from_settings(cls, settings_path: str) -> "AcquisitionGeometry":
+    def from_settings(cls, settings_path: str,
+                      image_roi: Optional[Dict] = None) -> "AcquisitionGeometry":
         settings = loadmat(
             settings_path, squeeze_me=True, struct_as_record=False)
         missing = [k for k in ("Geometry", "Transducer", "Transmit", "Medium")
@@ -84,13 +145,18 @@ class AcquisitionGeometry:
             raise KeyError(
                 "{} is missing the settings structs {}".format(
                     settings_path, ", ".join(missing)))
-        return cls(settings)
+        return cls(settings, image_roi=image_roi)
 
     # -- geometry ---------------------------------------------------------
 
     @property
     def lateral_limit_mm(self) -> float:
-        """Half-width of the beamformed image."""
+        """Rightmost column of the beamformed image.
+
+        This was the half-width back when the grid was centred on zero. The
+        grid follows the vessel box now, so read it as an edge, not a radius,
+        and use ``lateral_range_mm`` when both edges matter.
+        """
         return float(self.x_lat_mm[-1])
 
     @property
