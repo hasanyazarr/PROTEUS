@@ -13,7 +13,8 @@ def read(relpath: str) -> str:
 def test_load_rf_data_returns_frame_identity_and_pulse_metadata():
     src = read("delay-and-sum/load_RF_data.m")
 
-    assert "function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo]" in src
+    assert ("function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo, "
+            "SampleRange] = ...") in src
     assert "RFFileNames" in src
     assert "PulseInfo.PulsingScheme" in src
     assert "PulseInfo.PulseIDsUsed" in src
@@ -23,7 +24,8 @@ def test_load_rf_data_returns_frame_identity_and_pulse_metadata():
 def test_process_run_records_split_aware_preprocessing_state():
     src = read("scripts/process_run.m")
 
-    assert "[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo] = load_RF_data" in src
+    assert ("[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo, "
+            "sampleRange] = ...") in src
     assert "fit_frame_mask" in src
     assert "PreprocessingState.SVDFitFrameNumbers" in src
     assert "PreprocessingState.NormalizationMode" in src
@@ -83,6 +85,47 @@ def test_process_run_records_the_image_roi_it_used():
     assert "ROIState.MarginWavelengths" in src
     assert "ROIState.VesselBoxDepth" in src
     assert "process_run:InvalidImageROI" in src
+
+
+def test_process_run_loads_only_the_samples_the_beamformer_reads():
+    """DAS reads a window of each trace: the shallowest pixel sets the first
+    sample, the deepest corner pixel and the f-number aperture set the last.
+    On v7 that is samples 3452..6936 of 9512, so nearly two thirds of every
+    trace never enters the SVD, the Casorati matrix, or the DAS sum."""
+    src = read("scripts/process_run.m")
+
+    assert "select_sample_range(" in src
+    assert "SAMPLE_RANGE_MARGIN" in src
+    assert "F_NUMBER = 0.8;" in src   # must match compute_das_matrix
+    # The window is derived before the RF is read, so the crop saves the
+    # memory rather than just the arithmetic.
+    assert (src.index("wantedRange = select_sample_range(")
+            < src.index("load_RF_data(RESULTS_FOLDER"))
+
+
+def test_process_run_time_axis_follows_the_loaded_sample_window():
+    """A cropped trace starts at sample n0, so t must start there too or every
+    delay is wrong by the offset."""
+    src = read("scripts/process_run.m")
+
+    assert "t  = ((sampleRange(1)-1):(sampleRange(2)-1)) / Fs;" in src
+    assert "t = (0:(Nt-1)) / Fs;" not in src
+
+
+def test_process_run_records_the_sample_window_it_used():
+    src = read("scripts/process_run.m")
+
+    assert "PreprocessingState.SampleRange" in src
+    assert "PreprocessingState.SampleRangeSource" in src
+
+
+def test_load_RF_data_takes_a_sample_range():
+    src = read("delay-and-sum/load_RF_data.m")
+
+    assert ("function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo, "
+            "SampleRange] = ...") in src
+    assert "sampleRange" in src
+    assert "load_RF_data:InvalidSampleRange" in src
 
 
 def test_process_run_validates_the_preprocessing_split_policy():

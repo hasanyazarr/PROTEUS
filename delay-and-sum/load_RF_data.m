@@ -1,4 +1,5 @@
-function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo] = load_RF_data(resultsFolder,pulsingScheme)
+function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo, SampleRange] = ...
+    load_RF_data(resultsFolder,pulsingScheme,sampleRange)
 % LOAD_RF_DATA reads RF data files and applies a pulsing scheme.
 %
 % RF = LOAD_RF_DATA(resultsFolder,pulsingScheme) reads the RF data in the
@@ -7,9 +8,18 @@ function [RF_matrix, FrameNumbers, RFFileNames, PulseInfo] = load_RF_data(result
 % transducer elements, Nt the number of time samples, and Nframes the
 % number of frames.
 %
-% [RF, FrameNumbers, RFFileNames, PulseInfo] also returns the original source
-% frame numbers, source RF files, and pulse-combination metadata. Export code
-% must use FrameNumbers when looking up ground-truth labels.
+% RF = LOAD_RF_DATA(...,sampleRange) keeps only samples
+% sampleRange(1):sampleRange(2) of each trace. The caller is expected to
+% derive that window from the reconstruction it is going to perform: a
+% beamformer reads only the samples its shallowest and deepest pixels need,
+% and on the v7 acquisition that is about a third of each trace. Cropping
+% here rather than after the load is what saves the memory. Pass [] to keep
+% every sample.
+%
+% [RF, FrameNumbers, RFFileNames, PulseInfo, SampleRange] also returns the
+% original source frame numbers, source RF files, pulse-combination metadata,
+% and the sample window actually applied after clamping to the trace length.
+% Export code must use FrameNumbers when looking up ground-truth labels.
 %
 % Guillaume Lajoinie, Nathan Blanken, University of Twente, 2023
 
@@ -35,11 +45,30 @@ RF = RF{1};
 Nt = size(RF,2);    % Number of samples per RF line
 Nelem = size(RF,1); % Number of transducer elements
 
+% Sample window to keep:
+if nargin < 3 || isempty(sampleRange)
+    SampleRange = [1 Nt];
+else
+    if numel(sampleRange) ~= 2 || any(~isfinite(sampleRange)) || ...
+            sampleRange(2) < sampleRange(1) || sampleRange(1) < 1
+        error('load_RF_data:InvalidSampleRange', ...
+            'sampleRange must be [first last] with 1 <= first <= last.');
+    end
+    SampleRange = [max(1, round(sampleRange(1))), ...
+                   min(Nt, round(sampleRange(2)))];
+end
+Nkeep = SampleRange(2) - SampleRange(1) + 1;
+if SampleRange(2) < Nt || SampleRange(1) > 1
+    fprintf(['  keeping samples %d-%d of %d ' ...
+        '(%.1f%% of each trace)\n'], SampleRange(1), SampleRange(2), Nt, ...
+        100*Nkeep/Nt);
+end
+
 % Total number of frames in the list:
 Nframes = length(filelist);
 
 disp('Loading data and applying pulsing scheme')
-RF_matrix = zeros(Nelem,Nt,Nframes,class(RF));
+RF_matrix = zeros(Nelem,Nkeep,Nframes,class(RF));
 
 for iframe = 1:Nframes
     
@@ -57,7 +86,7 @@ for iframe = 1:Nframes
             
     end
     
-    RF_matrix(:,:,iframe) = RF;
+    RF_matrix(:,:,iframe) = RF(:,SampleRange(1):SampleRange(2));
     
 end
 

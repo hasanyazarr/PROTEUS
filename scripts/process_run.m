@@ -42,49 +42,25 @@ end
 
 DYNRANGE_VIZ = 60;   % dB, display window for bmode_gt / bmode_clean / video
 ROI_MARGIN_LAMBDA = 5;   % wavelengths of margin around the vessel bounding box
+SAMPLE_RANGE_MARGIN = 64; % samples of slack on each end of the loaded window
 
 %==========================================================================
-% LOAD SETTINGS & RF
+% LOAD SETTINGS
 %==========================================================================
 load(SETTINGS_PATH, 'Acquisition', 'Geometry', 'Medium', ...
     'SimulationParameters', 'Transducer', 'Transmit');
 
-fprintf('=== process_run: loading RF from %s ===\n', RESULTS_FOLDER);
-[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo] = load_RF_data(...
-    RESULTS_FOLDER, Acquisition.PulsingScheme);
-[Nelem, Nt, Nframes] = size(RF);
-fprintf('  %d elements, %d samples, %d frames\n', Nelem, Nt, Nframes);
-
-[fit_frame_mask, PreprocessingState] = build_preprocessing_state(...
-    PREPROCESSING_OPTIONS, sourceFrameNumbers);
-
 %==========================================================================
-% SVD CLUTTER FILTER
-%==========================================================================
-RF_fit_cas = double(reshape(RF(:,:,fit_frame_mask), ...
-    [Nelem*Nt, sum(fit_frame_mask)]));
-[U_fit, S_fit, ~] = svd(RF_fit_cas, 'econ');
-singular_values = diag(S_fit);
-[n_remove, PreprocessingState.SVD] = select_svd_cutoff(...
-    singular_values, PREPROCESSING_OPTIONS);
-fprintf('SVD clutter filter (cutoff=%d, mode=%s)...\n', ...
-    n_remove, PreprocessingState.SVD.Mode);
-RF_cas = double(reshape(RF, [Nelem*Nt, Nframes]));
-if n_remove > 0
-    clutter_basis = U_fit(:, 1:n_remove);
-    RF_cas = RF_cas - clutter_basis * (clutter_basis' * RF_cas);
-end
-RF_filt = single(reshape(RF_cas, [Nelem, Nt, Nframes]));
-PreprocessingState.SVDFitFrameNumbers = sourceFrameNumbers(fit_frame_mask);
-PreprocessingState.SVDFitScope = 'specified_source_frames';
-clear RF RF_fit_cas RF_cas U_fit S_fit clutter_basis;
-
-%==========================================================================
-% DAS SETUP + TGC
+% IMAGE GRID, TIME AXIS, AND THE SAMPLE WINDOW THEY IMPLY
+%
+% All of this comes from the settings alone, so it is derived before the RF
+% is read: the beamformer reads only a window of each trace, and cropping at
+% load time is what turns that into saved memory rather than saved
+% arithmetic.
 %==========================================================================
 Fs = SimulationParameters.SamplingRate;
-t  = (0:(Nt-1)) / Fs;
 
+Nelem = Transducer.NumberOfElements;
 p     = Transducer.Pitch;
 x_el  = -p/2*(Nelem-1) + (0:(Nelem-1))*p;
 focus = Transmit.LateralFocus;
@@ -125,7 +101,59 @@ if SimulationParameters.HybridSimulation
 else
     kWaveCorrection = dx_sim/(2*c) + dt_sim*3/2;
 end
-t = t - timeToPeak - lensCorrection + kWaveCorrection;
+timeShift = -timeToPeak - lensCorrection + kWaveCorrection;
+
+wantedRange = select_sample_range(z_ax, x_lat, x_el, c, Fs, timeShift, ...
+    focus, SAMPLE_RANGE_MARGIN);
+
+%==========================================================================
+% LOAD RF
+%==========================================================================
+fprintf('=== process_run: loading RF from %s ===\n', RESULTS_FOLDER);
+[RF, sourceFrameNumbers, sourceRFFileNames, pulseInfo, sampleRange] = ...
+    load_RF_data(RESULTS_FOLDER, Acquisition.PulsingScheme, wantedRange);
+[NelemRF, Nt, Nframes] = size(RF);
+if NelemRF ~= Nelem
+    error('process_run:ElementCountMismatch', ...
+        ['The RF data has %d elements but the settings declare %d. ' ...
+         'The settings do not describe this run.'], NelemRF, Nelem);
+end
+fprintf('  %d elements, %d samples, %d frames\n', Nelem, Nt, Nframes);
+
+[fit_frame_mask, PreprocessingState] = build_preprocessing_state(...
+    PREPROCESSING_OPTIONS, sourceFrameNumbers, PreprocessingState);
+PreprocessingState.SampleRange = sampleRange;
+PreprocessingState.SampleRangeSource = 'beamformer_delay_span';
+PreprocessingState.SampleRangeMargin = SAMPLE_RANGE_MARGIN;
+
+%==========================================================================
+% SVD CLUTTER FILTER
+%==========================================================================
+RF_fit_cas = double(reshape(RF(:,:,fit_frame_mask), ...
+    [Nelem*Nt, sum(fit_frame_mask)]));
+[U_fit, S_fit, ~] = svd(RF_fit_cas, 'econ');
+singular_values = diag(S_fit);
+[n_remove, PreprocessingState.SVD] = select_svd_cutoff(...
+    singular_values, PREPROCESSING_OPTIONS);
+fprintf('SVD clutter filter (cutoff=%d, mode=%s)...\n', ...
+    n_remove, PreprocessingState.SVD.Mode);
+RF_cas = double(reshape(RF, [Nelem*Nt, Nframes]));
+if n_remove > 0
+    clutter_basis = U_fit(:, 1:n_remove);
+    RF_cas = RF_cas - clutter_basis * (clutter_basis' * RF_cas);
+end
+RF_filt = single(reshape(RF_cas, [Nelem, Nt, Nframes]));
+PreprocessingState.SVDFitFrameNumbers = sourceFrameNumbers(fit_frame_mask);
+PreprocessingState.SVDFitScope = 'specified_source_frames';
+clear RF RF_fit_cas RF_cas U_fit S_fit clutter_basis;
+
+%==========================================================================
+% TIME AXIS + TGC
+%==========================================================================
+% The trace was cropped at load time, so the time axis starts at the first
+% kept sample. Anchoring it at zero would offset every delay.
+t  = ((sampleRange(1)-1):(sampleRange(2)-1)) / Fs;
+t  = t + timeShift;
 
 % TGC
 att = Medium.AttenuationA * (f0*1e-6)^Medium.AttenuationB;
@@ -340,7 +368,9 @@ end
 
 
 function [fit_frame_mask, PreprocessingState] = build_preprocessing_state(...
-    options, sourceFrameNumbers)
+    options, sourceFrameNumbers, PreprocessingState)
+% The caller has already recorded the geometry choices on PreprocessingState,
+% so extend it rather than starting a fresh struct.
 if isfield(options, 'SplitMode') && ~isempty(options.SplitMode)
     split_mode = options.SplitMode;
 else
@@ -387,6 +417,65 @@ PreprocessingState.SVDFitFrameNumbers = sourceFrameNumbers(fit_frame_mask);
 PreprocessingState.SVDFitScope = 'specified_source_frames';
 PreprocessingState.NormalizationMode = norm_mode;
 PreprocessingState.NormalizationReference = [];
+end
+
+
+function sampleRange = select_sample_range(z_ax, x_lat, x_el, c, Fs, ...
+    timeShift, focus, margin)
+%SELECT_SAMPLE_RANGE The window of each RF trace the beamformer will read.
+%
+% compute_das_matrix maps every (pixel, element) pair to one sample index and
+% silently drops indices outside the trace. So the only samples that matter
+% are the ones between the smallest and the largest index it produces: the
+% shallowest pixel directly under an element sets the first, the deepest
+% corner pixel and the widest element still inside the f-number aperture set
+% the last. On the v7 acquisition that window is samples 3452-6936 of 9512,
+% so nearly two thirds of every trace is never read.
+%
+% Cropping to it costs nothing in the reconstruction and takes the same
+% fraction off the RF in memory, the Casorati matrix, and the SVD. It also
+% leaves the near-surface transmit transient outside the filter, which on
+% this acquisition carries 99.9% of the recorded energy.
+%
+% Mirrors the geometry in compute_das_matrix: same delay law, same dynamic
+% f-number aperture.
+
+F_NUMBER = 0.8;   % must match compute_das_matrix
+
+Zmin = min(z_ax);
+Zmax = max(z_ax);
+
+% Shallowest arrival: a pixel with an element directly above it. Only
+% reachable when the array actually spans that lateral position.
+Xnear = min(max(0, min(x_lat)), max(x_lat));
+t_min = delay_law(Xnear, Zmin, Xnear, c, focus);
+
+% Deepest arrival: the far corner of the grid, seen by the most oblique
+% element the aperture still admits.
+half_aperture = Zmax / (2 * F_NUMBER);
+t_max = -Inf;
+for X = [min(x_lat), max(x_lat)]
+    reach = [max(min(x_el), X - half_aperture), ...
+             min(max(x_el), X + half_aperture)];
+    for xe = reach
+        t_max = max(t_max, delay_law(X, Zmax, xe, c, focus));
+    end
+end
+
+j_min = round((t_min - timeShift) * Fs) + 1;
+j_max = round((t_max - timeShift) * Fs) + 1;
+sampleRange = [max(1, j_min - margin), j_max + margin];
+end
+
+
+function t_del = delay_law(X, Y, x_el, c, focus)
+%DELAY_LAW Round-trip delay for one pixel and one element. compute_das_matrix.
+F = abs(focus);
+if isfinite(F)
+    t_del = sqrt((X - x_el).^2 + Y.^2)/c + sqrt((Y + F).^2 + X.^2)/c - F/c;
+else
+    t_del = sqrt((X - x_el).^2 + Y.^2)/c + Y/c;
+end
 end
 
 
