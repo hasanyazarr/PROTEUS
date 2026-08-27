@@ -60,12 +60,30 @@ inlet = inlet.inlet;
 load(GeometryPropertiesFilename,'options');
 options = odeset(options,'Events',@(t,y)exitVesselFcn(t,y,Grid));
 
-% Velocity scaling factor for MB trajectory integration and effective labels:
+% Velocity scaling factor for MB trajectory integration and effective labels.
+% The default is the CFD field as the CFD solved it. This was hardcoded at 5
+% until 2026-08-27, so every dataset carried a 5x flow that no settings file
+% recorded: the value reached the ODE without passing through Acquisition,
+% and a reader holding the config could not have known. A run that wants
+% faster flow now has to ask for it, where write_run_manifest and
+% check_ground_truth_data can both see the request.
+%
+% The scale does not touch single-bubble physics -- velocity never reaches
+% the bubble solver, only the trajectory integration and the labels. What it
+% does set is inter-frame displacement, and that is what makes a dataset
+% trackable or not. Measured on run_20260827_082616 at scale 5 and 500 Hz:
+% median displacement 218 um against a median nearest-neighbour spacing of
+% 131 um, a ratio of 1.66. Below 1 is the trackable regime.
 if isfield(Acquisition, 'VelocityScale') && ~isempty(Acquisition.VelocityScale)
     VELOCITY_SCALE = Acquisition.VelocityScale;
+    velocityScaleSource = 'Acquisition.VelocityScale';
 else
-    VELOCITY_SCALE = 5;
+    VELOCITY_SCALE = 1;
+    velocityScaleSource = 'default, field absent from settings';
 end
+validate_velocity_scale(VELOCITY_SCALE, velocityScaleSource);
+fprintf('MB velocity scale: %g x CFD field (%s)\n', ...
+    VELOCITY_SCALE, velocityScaleSource);
 
 % Random vessel-volume seeding can otherwise pick stagnant/near-stagnant
 % cells, which creates MBs that appear fixed across many frames. Weight
@@ -619,4 +637,18 @@ function s = rmfield_if_exists(s, name)
 if isfield(s, name)
     s = rmfield(s, name);
 end
+end
+
+
+function validate_velocity_scale(scale, source)
+% A scale that is zero, negative, or non-finite integrates to a silently
+% wrong trajectory rather than to an error, and the ground truth would look
+% well-formed afterwards. Reject it where the value enters instead.
+
+if ~isnumeric(scale) || ~isscalar(scale) || ~isfinite(scale) || scale <= 0
+    error('generate_streamlines:InvalidVelocityScale', ...
+        ['Velocity scale must be a positive finite scalar, got %s ' ...
+         'from %s.'], mat2str(scale), source);
+end
+
 end

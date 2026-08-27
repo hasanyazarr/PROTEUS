@@ -266,3 +266,32 @@ def test_process_run_no_longer_exports_a_super_resolution_dataset():
     assert "instance_targets" not in src
     assert "gauss_point" not in src
     assert not (ROOT / "scripts/dataset_export.m").exists()
+
+
+def test_velocity_scale_defaults_to_the_unscaled_cfd_field():
+    """A settings file that says nothing about velocity gets the CFD field as
+    the CFD solved it. The scale was hardcoded at 5 until 2026-08-27, so every
+    dataset carried a 5x flow that no settings file recorded and no reader
+    could have inferred from the config."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "VELOCITY_SCALE = 1;" in src
+    assert "VELOCITY_SCALE = 5;" not in src
+
+
+def test_velocity_scale_reports_whether_it_came_from_settings():
+    """The scale changes what the dataset means, so a run has to say out loud
+    which value it used and whether a settings file asked for it."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "velocityScaleSource" in src
+    assert "'Acquisition.VelocityScale'" in src
+    assert "MB velocity scale" in src
+
+
+def test_velocity_scale_is_validated_before_it_reaches_the_ode():
+    """A zero, negative, or non-finite scale integrates to a silently wrong
+    trajectory rather than an error."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "generate_streamlines:InvalidVelocityScale" in src
