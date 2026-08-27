@@ -100,8 +100,15 @@ def test_frame_line_reports_progress_stages_and_eta():
     # The per-frame bubble count moved out of the once-per-run banner.
     assert "case 'count'" in src
     # ODE measures part of MB; printing them as sibling columns invites
-    # summing a row whose entries overlap.
-    assert "NESTED = {'ODE', 'MB'; 'dist', 'prop'; 'field', 'prop'; " in src
+    # summing a row whose entries overlap. Asserted pair by pair rather than
+    # as one literal, so adding a child stage does not break the test for a
+    # reason that has nothing to do with what it is checking.
+    assert "NESTED = {" in src
+    for child, parent in [("ODE", "MB"), ("idx", "sense"), ("weights", "sense"),
+                          ("dist", "prop"), ("field", "prop"),
+                          ("accum", "prop")]:
+        assert "'{}', '{}'".format(child, parent) in src, \
+            "{} is not declared as part of {}".format(child, parent)
     assert "ORDER = {'load', 'sense', 'MB', 'prop', 'RF', 'save'};" in src
     # An 8-hour run needs to say when it will finish.
     assert "sprintf('ETA %s'" in src

@@ -324,15 +324,30 @@ if SimulationParameters.HybridSimulation
                 % bubble positions. The batch sensor covers every frame in
                 % the batch, so this both selects rows and applies the
                 % per-bubble interpolation weights.
+                % Split because the two halves have different fixes. The
+                % selection re-intersects mask_idx_MB_batch -- constant for
+                % the whole batch -- against this frame's mask on every frame,
+                % so it is a hoist if it dominates. The weighting is a sparse
+                % product that has to go through double, since MATLAB has no
+                % single-precision sparse, so it is not. Measured together at
+                % 2.4 s of a 14.8 s frame, which is 16% with no way to tell
+                % which half.
                 t_sense = tic;
+                t_idx = tic;
                 sensor_data_MB = extract_sensor_subset(...
                     sensor_data_MB_1iter{pulse_seq_idx}, ...
                     mask_idx_MB_batch, mask_idx_frame, n_mb_time);
                 sensor_data_trans = sensor_data_transducer_1iter{pulse_seq_idx};
+                sync_if_on_device(sensor_data_MB.p);
+                run_log('stage', 'idx', toc(t_idx));
 
                 % Pressure sensed by the microbubbles
+                t_weights = tic;
                 sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
                 sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
+                sync_if_on_device(sensed_p);
+                run_log('stage', 'weights', toc(t_weights));
+
                 run_log('stage', 'sense', toc(t_sense));
 
                 stopAfterCapture = capture_sensed_pressure_if_requested(...
@@ -714,6 +729,19 @@ for batch_idx = 1:num_batches
     batch_end = min(end_frame, batch_start + batch_size - 1);
     frame_batches(batch_idx, :) = [batch_start, batch_end];
 end
+end
+
+
+function sync_if_on_device(data)
+% Timing a stage whose result is still queued on the GPU measures how long it
+% took to submit the work, not to do it. Only pay for the barrier when the
+% data is actually on the device -- the k-Wave binaries hand back host arrays,
+% so on those paths this costs nothing.
+
+if isa(data, 'gpuArray')
+    wait(gpuDevice);
+end
+
 end
 
 
