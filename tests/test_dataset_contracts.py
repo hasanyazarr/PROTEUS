@@ -326,3 +326,35 @@ def test_the_reseed_policy_reaches_the_ground_truth():
     src = read("streamline-module/generate_streamlines.m")
 
     assert "FlowSimulationParameters.Seeding.ReseedFrom" in src
+
+
+def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
+    """Two transmit runs are a memory trade, not a free structural split.
+
+    The transducer-only run and the MB-only run propagate the same pulse
+    through the same medium; only the recorded points and the record length
+    differ. Measured 2026-08-27 on run_20260827_082616: 816.58 s for the
+    transducer run plus 449.50 s for the MB run, where one combined run at
+    the round-trip length is 816.58 s. Split cost is 817 + n*450 against a
+    combined n*817, so the split only pays from three batches on. With a
+    single batch - the production setting, TransmitBatchSize = NumberOfFrames
+    - it is 450 s per pulse spent for nothing.
+    """
+    src = read("acoustic-module/main_RF.m")
+
+    assert "combine_transmit_sensors = num_batches == 1;" in src
+    assert "Simulating combined transducer and MB transmit wave." in src
+    # The combined sensor is the union of the two masks, recorded for the
+    # round trip the transducer needs.
+    assert "sensor_combined.mask = logical(" in src
+    assert "sensor_combined.record = sensor_MB_batch.record;" in src
+    # Both sensor sets come out of that one run.
+    assert "sensor_data_transducer_1iter{pulse_seq_idx} = ..." in src
+    assert "mask_idx_combined, mask_idx_trans, n_transducer_time);" in src
+    # The MB rows are kept only for the one-way window, so the block held
+    # through the frame loop is the size the split path held.
+    assert "mask_idx_combined, mask_idx_MB_batch, n_mb_time);" in src
+    # The split path stays for the multi-batch case.
+    assert "Simulating transducer-only transmit wave." in src
+    assert "Simulating MB-only transmit wave." in src
+

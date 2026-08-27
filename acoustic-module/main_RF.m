@@ -192,32 +192,48 @@ if SimulationParameters.HybridSimulation
     transmit_batch_size = get_transmit_batch_size(...
         SimulationParameters, Acquisition);
     frame_batches = make_frame_batches(Acquisition.StartFrame, Acquisition.EndFrame, transmit_batch_size);
+    num_batches = size(frame_batches, 1);
 
-    sensor_data_transducer_1iter = cell(1,length(sequence));
-    kgrid.Nt = floor(run_param.tr(3) / kgrid.dt) + 1;
+    % The transducer-only and MB-only runs propagate the same pulse through
+    % the same medium; they differ only in which points are recorded and for
+    % how long. The split pays off only because the MB run is short and the
+    % transducer run is done once: it costs one round-trip run plus one
+    % one-way run per batch, against one round-trip run per batch for a
+    % combined sensor. Measured on run_20260827_082616: 816.58 s round trip,
+    % 449.50 s one way, so the split wins from three batches on and loses
+    % 449.50 s per pulse at a single batch - which is the production setting.
+    % So record both sensor sets in one run whenever there is one batch.
+    combine_transmit_sensors = num_batches == 1;
 
-    for pulse_seq_idx = 1 : length(sequence)
-        % Simulation time and memory estimation:
-        if pulse_seq_idx == 1 && estimate == true
-            beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
-            estim_time_mem(Grid, source_transducer{pulse_seq_idx}, param, ...
-                beta_coeff_file);
-        end
+    n_transducer_time = floor(run_param.tr(3) / kgrid.dt) + 1;
+    n_mb_time = floor(run_param.tr(1) / kgrid.dt) + 1;
 
-        disp('Simulating transducer-only transmit wave.')
-        t_tx = tic;
-        sensor_data_transducer_1iter{pulse_seq_idx} = run_simulation(...
-            run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
-            sensor_transducer);
-        fprintf('[TIMING] Transducer transmit wave (pulse %d): %.2f s\n', ...
-            pulse_seq_idx, toc(t_tx));
+    % Simulation time and memory estimation:
+    if estimate == true
+        beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
+        estim_time_mem(Grid, source_transducer{1}, param, beta_coeff_file);
     end
 
-    for batch_idx = 1:size(frame_batches, 1)
+    sensor_data_transducer_1iter = cell(1,length(sequence));
+
+    if ~combine_transmit_sensors
+        kgrid.Nt = n_transducer_time;
+        for pulse_seq_idx = 1 : length(sequence)
+            disp('Simulating transducer-only transmit wave.')
+            t_tx = tic;
+            sensor_data_transducer_1iter{pulse_seq_idx} = run_simulation(...
+                run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
+                sensor_transducer);
+            fprintf('[TIMING] Transducer transmit wave (pulse %d): %.2f s\n', ...
+                pulse_seq_idx, toc(t_tx));
+        end
+    end
+
+    for batch_idx = 1:num_batches
         batch_start = frame_batches(batch_idx, 1);
         batch_end = frame_batches(batch_idx, 2);
         fprintf('=== MB transmit batch %d/%d: frames %d-%d ===\n', ...
-            batch_idx, size(frame_batches, 1), batch_start, batch_end);
+            batch_idx, num_batches, batch_start, batch_end);
 
         AcquisitionBatch = Acquisition;
         AcquisitionBatch.StartFrame = batch_start;
@@ -235,18 +251,53 @@ if SimulationParameters.HybridSimulation
             warning('Microbubbles on transducer.')
         end
 
-        mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
         sensor_data_MB_1iter = cell(1,length(sequence));
-        kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;
 
-        for pulse_seq_idx = 1 : length(sequence)
-            disp('Simulating MB-only transmit wave.')
-            t_tx = tic;
-            sensor_data_MB_1iter{pulse_seq_idx} = run_simulation(...
-                run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
-                sensor_MB_batch);
-            fprintf('[TIMING] MB transmit wave (pulse %d, frames %d-%d): %.2f s\n', ...
-                pulse_seq_idx, batch_start, batch_end, toc(t_tx));
+        if combine_transmit_sensors
+            % One sensor over both masks, recorded for the round trip the
+            % transducer needs. A grid point carried by both masks is stored
+            % once and read by both extractions below.
+            sensor_combined.mask = logical(...
+                sensor_MB_batch.mask + sensor_transducer.mask);
+            sensor_combined.record = sensor_MB_batch.record;
+            mask_idx_combined = find(sensor_combined.mask);
+            mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
+            kgrid.Nt = n_transducer_time;
+
+            for pulse_seq_idx = 1 : length(sequence)
+                disp('Simulating combined transducer and MB transmit wave.')
+                t_tx = tic;
+                sensor_data_combined = run_simulation(...
+                    run_param, kgrid, medium, ...
+                    source_transducer{pulse_seq_idx}, sensor_combined);
+                fprintf('[TIMING] Combined transmit wave (pulse %d, frames %d-%d): %.2f s\n', ...
+                    pulse_seq_idx, batch_start, batch_end, toc(t_tx));
+
+                % Split the one run into the two sensor sets the split path
+                % produced separately. The bubbles only ever read the one-way
+                % window, so what is held through the frame loop is the same
+                % size the split path held.
+                sensor_data_transducer_1iter{pulse_seq_idx} = ...
+                    extract_sensor_subset(sensor_data_combined, ...
+                    mask_idx_combined, mask_idx_trans, n_transducer_time);
+                sensor_data_MB_1iter{pulse_seq_idx} = ...
+                    extract_sensor_subset(sensor_data_combined, ...
+                    mask_idx_combined, mask_idx_MB_batch, n_mb_time);
+                clear sensor_data_combined
+            end
+        else
+            mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
+            kgrid.Nt = n_mb_time;
+
+            for pulse_seq_idx = 1 : length(sequence)
+                disp('Simulating MB-only transmit wave.')
+                t_tx = tic;
+                sensor_data_MB_1iter{pulse_seq_idx} = run_simulation(...
+                    run_param, kgrid, medium, ...
+                    source_transducer{pulse_seq_idx}, sensor_MB_batch);
+                fprintf('[TIMING] MB transmit wave (pulse %d, frames %d-%d): %.2f s\n', ...
+                    pulse_seq_idx, batch_start, batch_end, toc(t_tx));
+            end
         end
 
         for frame = batch_start : batch_end
@@ -267,7 +318,6 @@ if SimulationParameters.HybridSimulation
                     define_sensor_MB(Grid, MB);
 
                 mask_idx_frame = find(logical(sensor_frame.mask));
-                n_mb_time = floor(run_param.tr(1) / kgrid.dt) + 1;
                 run_log('stage', 'load', toc(t_load));
 
                 % Taking the batch's recorded transmit down to this frame's

@@ -130,7 +130,9 @@ def test_every_part_of_the_frame_is_accounted_for():
                         ("t_save", "save([savedir filesep file_name]")):
         opened = src.index(timer + " = tic;")
         closed = src.index("toc(" + timer + ")")
-        assert opened < src.index(call) < closed, timer
+        # Search from the timer: extract_sensor_subset is also called once per
+        # batch, to split the combined transmit run into its two sensor sets.
+        assert opened < src.index(call, opened) < closed, timer
 
 
 def test_solver_banner_carries_policy_not_per_frame_counts():
