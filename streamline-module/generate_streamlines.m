@@ -130,11 +130,22 @@ validate_reseed_from(RESEED_FROM, reseedFromSource);
 fprintf('MB reseeding: %s (%s)\n', RESEED_FROM, reseedFromSource);
 
 % Random vessel-volume seeding can otherwise pick stagnant/near-stagnant
-% cells, which creates MBs that appear fixed across many frames. Weight
-% start-position sampling toward the faster half of the CFD velocity field.
-SeedCfg.Enabled = true;
+% cells, which creates MBs that appear fixed across many frames. Weighting
+% start-position sampling toward the faster half of the CFD velocity field
+% fixes that, at the cost of a dataset that barely visits the slow vessels:
+% measured on run_20260827_082616, only 1.9% of visited samples fall below the
+% cut, against a median visited speed of 4.6x it. Those are the vessels ULM
+% exists to resolve, so the trade is the caller's to make.
+%
+% This was three literals with no Acquisition hook at all -- not even a read
+% path -- until 2026-08-27. It defaults to off, which is upstream's uniform
+% sampling over the vessel volume.
+SeedCfg.Enabled = false;
 SeedCfg.MinSpeedPercentile = 50;
 SeedCfg.WeightPower = 1;
+if isfield(Acquisition, 'Seeding') && ~isempty(Acquisition.Seeding)
+    SeedCfg = merge_struct(SeedCfg, Acquisition.Seeding);
+end
 [vtuStruct, SeedStats] = apply_velocity_weighted_seeding(vtuStruct, SeedCfg);
 if SeedCfg.Enabled
     fprintf(['Velocity-weighted MB seeding: keeping %.1f%% of vessel cells ' ...
@@ -157,8 +168,13 @@ end
 % --- Vessel tiling: replicate the canonical vessel across the imaging FOV
 % with a random per-streamline offset (and optional rotation about the
 % elevation axis) so MBs cover the whole image plane and flow in different
-% directions. Set TileCfg.Enabled=false to restore single-vessel behaviour.
-TileCfg.Enabled              = true;
+% directions.
+%
+% Defaults to off -- upstream has one vessel. It defaulted to ON until
+% 2026-08-27 and was off in production only because the driver notebook wrote
+% Acquisition.Tiling = struct('Enabled', false) over it. Four runs did use it:
+% run_20260702 through run_20260716, at 200 tiles.
+TileCfg.Enabled              = false;
 TileCfg.RandomizeRotation    = true;          % rotate flow direction in image plane
 TileCfg.DepthRange           = [-0.025, 0.002];  % m, image-X (depth) offset range
 TileCfg.WidthRange           = [-0.015, 0.015];  % m, image-Y (lateral) offset range
@@ -169,6 +185,16 @@ TileCfg.TransformFrame = 'vessel_to_image_consistent';
 TileCfg.RandomSeed           = 0;
 TileCfg.NumTiles             = max(1, NBubbles);
 if isfield(Acquisition, 'Tiling') && ~isempty(Acquisition.Tiling)
+    % v9b, v9c and v9d set offset ranges and no Enabled field, so they ran
+    % tiled purely on the old default of true. Flipping that default would
+    % have made all three single-vessel runs with nothing said, so an
+    % ambiguous struct is refused rather than resolved.
+    if ~isfield(Acquisition.Tiling, 'Enabled')
+        error('generate_streamlines:TilingEnabledMissing', ...
+            ['Acquisition.Tiling was given without an Enabled field. ' ...
+             'Tiling defaulted to on until 2026-08-27; state ' ...
+             'Acquisition.Tiling.Enabled explicitly.']);
+    end
     TileCfg = merge_struct(TileCfg, Acquisition.Tiling);
 end
 TileCfg.Transforms = build_tile_transforms(TileCfg);
@@ -515,10 +541,12 @@ end
 % TILE HELPERS
 %==========================================================================
 
-function TileCfg = merge_struct(TileCfg, override)
+function base = merge_struct(base, override)
+% Overlay the fields an Acquisition struct provides onto the defaults. Used
+% for both the tiling and the seeding config, so the names stay generic.
 fields = fieldnames(override);
 for i = 1:numel(fields)
-    TileCfg.(fields{i}) = override.(fields{i});
+    base.(fields{i}) = override.(fields{i});
 end
 end
 

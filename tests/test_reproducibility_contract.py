@@ -62,3 +62,33 @@ def test_a_resolved_seed_is_always_a_number_even_when_shuffled():
     assert "'shuffle'" in src
     assert "rng('shuffle')" in src
     assert "resolve_random_seed:InvalidSeed" in src
+
+
+def test_velocity_weighted_seeding_is_a_settings_field():
+    """SeedCfg was three literals with no Acquisition hook at all -- not even a
+    read path, unlike the velocity scale. It drops the slow half of the CFD
+    cells and weights the rest by speed, which is why only 1.9% of visited
+    samples in run_20260827_082616 sat below the cut."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "SeedCfg.Enabled = false;" in src
+    assert "isfield(Acquisition, 'Seeding')" in src
+
+
+def test_tiling_defaults_to_off():
+    """TileCfg.Enabled was true, and tiling was off in production only because
+    the driver notebook wrote Acquisition.Tiling = struct('Enabled', false).
+    Upstream has one vessel."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "TileCfg.Enabled              = false;" in src
+
+
+def test_a_tiling_struct_without_enabled_is_an_error():
+    """v9b, v9c and v9d set tiling ranges and no Enabled field, so they ran
+    tiled purely on the old default of true. Flipping that default would have
+    turned all three into single-vessel runs with nothing said. Refusing the
+    ambiguous struct turns a silent change into a loud one."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "generate_streamlines:TilingEnabledMissing" in src
