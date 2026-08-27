@@ -123,24 +123,29 @@ for m = 1:N_source
     W = exp(-d * alpha_f - 2i*pi * d * f_over_c);
     W(:,ceil(N_ext/2+1):N_ext) = conj(W(:,floor(1+N_ext/2):-1:2));
 
-    % Apply Green's function with pre-computed FFT
+    % Apply Green's function with pre-computed FFT.
+    %
+    % Mask d on its own zeros, as upstream's calc_scatter_attenuated did with
+    % r(r==0) = Inf. Masking it with d0's zeros instead is a length mismatch
+    % whenever run_param.gridded is set: d then holds one entry per
+    % distance-grid point and d0 one per sensor.
     d_safe = d;
-    d_safe(d0 == 0) = Inf;
+    d_safe(d == 0) = Inf;
     p = real(ifft(MS_dot_fft(m,:) ./ (4*pi*d_safe) .* W, [], 2));
     p = p(:, 1:N_ext/2);
-
-    % Prevent sources from self-sensing:
-    p(d0 == 0,:) = 0;
 
     stage_toc(profilePropagation, 'field', t_field, useGPU);
     t_accum = stage_tic(profilePropagation);
 
-    % Add the sensed echo to the sensor data:
+    % Expand the distance grid back to sensor points before suppressing
+    % self-sensing: only then is a row a sensor, which is what d0 indexes.
     if run_param.gridded
-        sensor_data.p = sensor_data.p + p(i_sampled,:);
+        p_sensor = p(i_sampled,:);
     else
-        sensor_data.p = sensor_data.p + p;
+        p_sensor = p;
     end
+    p_sensor(d0 == 0,:) = 0;
+    sensor_data.p = sensor_data.p + p_sensor;
 
     stage_toc(profilePropagation, 'accum', t_accum, useGPU);
 

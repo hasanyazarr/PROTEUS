@@ -92,3 +92,26 @@ def test_a_tiling_struct_without_enabled_is_an_error():
     src = read("streamline-module/generate_streamlines.m")
 
     assert "generate_streamlines:TilingEnabledMissing" in src
+
+
+def test_self_sensing_is_masked_on_the_array_it_indexes():
+    """d holds one entry per distance-grid point when run_param.gridded is set
+    and one per sensor otherwise, while d0 always holds one per sensor. The
+    inlined Green's function masked d with d0's mask, which is the wrong length
+    on the gridded path -- harmless only while no bubble sits exactly on a
+    transducer point. Upstream's calc_scatter_attenuated masked r on r == 0,
+    the array it was about to divide by."""
+    src = read("acoustic-module/run_simulation_homogeneous.m")
+
+    assert "d_safe(d == 0) = Inf;" in src
+    assert "d_safe(d0 == 0)" not in src
+
+
+def test_self_sensing_is_zeroed_after_the_grid_is_expanded_back():
+    """Zeroing p on d0's mask before the i_sampled expansion indexes
+    distance-grid rows with a sensor-length mask. After the expansion the rows
+    are sensors again and the mask fits."""
+    src = read("acoustic-module/run_simulation_homogeneous.m")
+
+    assert "p_sensor(d0 == 0,:) = 0;" in src
+    assert "p(d0 == 0,:) = 0;" not in src

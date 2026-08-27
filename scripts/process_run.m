@@ -216,6 +216,12 @@ end
 if ~exist(VIZ_OUT, 'dir'), mkdir(VIZ_OUT); end
 fprintf('=== Writing viz outputs to %s ===\n', VIZ_OUT);
 
+% Everything above decided how this pass cropped, filtered and normalised the
+% run. Write it down before drawing anything: until 2026-08-27 it existed only
+% as stdout, so the ROI of a finished run could not be recovered from its
+% outputs.
+write_preprocessing_state(VIZ_OUT, PreprocessingState);
+
 IMG_disp = max(IMG_db, -DYNRANGE_VIZ);
 
 sample_idx = unique([1, round(Nframes/2), Nframes]);
