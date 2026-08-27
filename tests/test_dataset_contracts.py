@@ -295,3 +295,34 @@ def test_velocity_scale_is_validated_before_it_reaches_the_ode():
     src = read("streamline-module/generate_streamlines.m")
 
     assert "generate_streamlines:InvalidVelocityScale" in src
+
+
+def test_a_bubble_that_leaves_the_vessel_is_reseeded_at_the_inlet():
+    """Upstream put a bubble that exited back at the inlet, so it had to
+    traverse the tree. The tiling rewrite routed the reseed through
+    build_tile_problem, which draws from the vessel bulk instead -- measured on
+    run_20260827_082616, reseed positions have the same spatial distribution as
+    the frame-1 bulk seeds (spans 11.35 vs 11.27 mm, centroids 0.39 mm apart)
+    rather than clustering at one vessel end."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "RESEED_FROM = 'inlet';" in src
+    assert "'Acquisition.ReseedFrom'" in src
+    assert "generate_streamlines:InvalidReseedFrom" in src
+
+
+def test_the_reseed_source_is_a_parameter_not_a_literal():
+    """build_tile_problem drew from vtuStruct whichever call reached it, so the
+    first seed and the reseed could not differ. They have to: upstream seeds
+    the first bubble in the bulk and every later one at the inlet."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "seedStruct" in src
+    assert "draw_start_position(1, seedStruct)" in src
+    assert "draw_start_position(1, vtuStruct)" not in src
+
+
+def test_the_reseed_policy_reaches_the_ground_truth():
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "FlowSimulationParameters.Seeding.ReseedFrom" in src

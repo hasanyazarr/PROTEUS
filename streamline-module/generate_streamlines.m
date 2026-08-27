@@ -85,6 +85,31 @@ validate_velocity_scale(VELOCITY_SCALE, velocityScaleSource);
 fprintf('MB velocity scale: %g x CFD field (%s)\n', ...
     VELOCITY_SCALE, velocityScaleSource);
 
+% Where a bubble that has left the vessel is put back. Upstream reseeded at
+% the inlet, which forced every replacement bubble to traverse the tree from
+% the feeding vessel down. The tiling rewrite routed the reseed through
+% build_tile_problem, which draws from the vessel bulk, and the inlet has
+% been dead code since: loaded, passed into track_bubble, never read.
+%
+% Measured on run_20260827_082616, the two are not close. Reseed positions
+% span 11.35 x 5.28 x 16.06 mm against the frame-1 bulk seeds' 11.27 x 5.57
+% x 16.31 mm, with centroids 0.39 mm apart -- one cloud, not a cluster at a
+% vessel end.
+%
+% It compounds with velocity-weighted seeding: a bubble starts in the fast
+% half of the field and, on exit, is reborn there rather than upstream, so
+% the slow vessels are never traversed. Only 1.9% of visited samples in that
+% run fall below the seeding cut.
+if isfield(Acquisition, 'ReseedFrom') && ~isempty(Acquisition.ReseedFrom)
+    RESEED_FROM = lower(char(Acquisition.ReseedFrom));
+    reseedFromSource = 'Acquisition.ReseedFrom';
+else
+    RESEED_FROM = 'inlet';
+    reseedFromSource = 'default, field absent from settings';
+end
+validate_reseed_from(RESEED_FROM, reseedFromSource);
+fprintf('MB reseeding: %s (%s)\n', RESEED_FROM, reseedFromSource);
+
 % Random vessel-volume seeding can otherwise pick stagnant/near-stagnant
 % cells, which creates MBs that appear fixed across many frames. Weight
 % start-position sampling toward the faster half of the CFD velocity field.
@@ -187,7 +212,7 @@ if useparfor
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, TileCfg, n, n, NBubbles);  % tile seed, slot
+            VELOCITY_SCALE, RESEED_FROM, TileCfg, n, n, NBubbles);
     end
 
     % Assign the streamline values in the cells to the matrices:
@@ -226,7 +251,7 @@ else
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, TileCfg, n, n, NBubbles);  % tile seed, slot
+            VELOCITY_SCALE, RESEED_FROM, TileCfg, n, n, NBubbles);
 
     end
     
@@ -284,6 +309,7 @@ FlowSimulationParameters.Identity.Definition = ...
 FlowSimulationParameters.Tiling = TileCfg;
 FlowSimulationParameters.Tiling.Transforms = TileCfg.Transforms;
 FlowSimulationParameters.Seeding = SeedCfg;
+FlowSimulationParameters.Seeding.ReseedFrom = RESEED_FROM;
 FlowSimulationParameters.Seeding.Stats = SeedStats;
 
 save([PATHS.GroundTruthPath, filesep, savefolder, ...
@@ -318,8 +344,16 @@ end
 function [streamlines, velocities, rawVelocities, streamNumbers, tileIDs, ...
     radii, bubbleIndexes, trackIDs] = ...
     track_bubble(Microbubble, Acquisition, Grid, vtuStruct, inlet, ...
-    odefun, options, showStreamlines, VELOCITY_SCALE, TileCfg, ...
-    initialTileID, bubbleIndex, NBubbles)
+    odefun, options, showStreamlines, VELOCITY_SCALE, RESEED_FROM, ...
+    TileCfg, initialTileID, bubbleIndex, NBubbles)
+
+% The first bubble of a slot starts in the vessel bulk, as upstream does.
+% Every replacement after it goes wherever the reseed policy says.
+if strcmp(RESEED_FROM, 'inlet')
+    reseedStruct = inlet;
+else
+    reseedStruct = vtuStruct;
+end
 
 %--------------------------------------------------------------------------
 % GET USER PARAMETERS
@@ -359,7 +393,7 @@ tileID = next_tile_id(TileCfg, initialTileID);
 [tileRot, tileOffset] = sample_tile(TileCfg, tileID);
 [odefun_eff, options_eff, startPosition] = ...
     build_tile_problem(TileCfg, tileRot, tileOffset, ...
-        Grid, vtuStruct, options, VELOCITY_SCALE, odefun);
+        Grid, vtuStruct, vtuStruct, options, VELOCITY_SCALE, odefun);
 
 tspan = acquisitionTimes;
 
@@ -432,7 +466,7 @@ while max(t)<max(acquisitionTimes)
     [tileRot, tileOffset] = sample_tile(TileCfg, tileID);
     [odefun_eff, options_eff, startPosition] = ...
         build_tile_problem(TileCfg, tileRot, tileOffset, ...
-            Grid, vtuStruct, options, VELOCITY_SCALE, odefun);
+            Grid, vtuStruct, reseedStruct, options, VELOCITY_SCALE, odefun);
 
     % Update time array (remaining time):
     tspan = acquisitionTimes(find(acquisitionTimes>t(end),1):end);
@@ -550,14 +584,19 @@ end
 
 function [odefun_eff, options_eff, startPosition] = ...
     build_tile_problem(TileCfg, tileRot, tileOffset, Grid, vtuStruct, ...
-                       options, VELOCITY_SCALE, odefun_canonical)
+                       seedStruct, options, VELOCITY_SCALE, odefun_canonical)
 % Build the tile-aware ODE function, ODE event options, and a fresh start
 % position for the next streamline.
+%
+% vtuStruct is the velocity field the ODE integrates; seedStruct is where the
+% start position is drawn from. They are the same for a slot's first bubble
+% and differ for a reseed under the 'inlet' policy, which is why the caller
+% passes both rather than this deciding.
 
 if ~TileCfg.Enabled
     odefun_eff    = odefun_canonical;
     options_eff   = options;
-    startPosition = draw_start_position(1, vtuStruct);
+    startPosition = draw_start_position(1, seedStruct);
     return
 end
 
@@ -576,7 +615,7 @@ options_eff = odeset(options, 'Events', ...
     @(t, y) exitVesselFcn(t, to_canonical(y), Grid));
 
 % Sample a canonical start position then transform it into the tile.
-canonical_start = draw_start_position(1, vtuStruct);  % 1x3 row
+canonical_start = draw_start_position(1, seedStruct);  % 1x3 row
 startPosition = transpose( ...
     tileRot * (canonical_start' - BB) + BB + tileOffset);
 
@@ -649,6 +688,21 @@ if ~isnumeric(scale) || ~isscalar(scale) || ~isfinite(scale) || scale <= 0
     error('generate_streamlines:InvalidVelocityScale', ...
         ['Velocity scale must be a positive finite scalar, got %s ' ...
          'from %s.'], mat2str(scale), source);
+end
+
+end
+
+
+function validate_reseed_from(policy, source)
+% Reject an unrecognised reseed policy rather than silently falling through
+% to the vessel bulk, which is the behaviour this field exists to make
+% visible.
+
+allowed = {'inlet', 'bulk'};
+if ~ismember(policy, allowed)
+    error('generate_streamlines:InvalidReseedFrom', ...
+        ['Reseed policy must be one of %s, got ''%s'' from %s.'], ...
+        strjoin(allowed, ', '), policy, source);
 end
 
 end
