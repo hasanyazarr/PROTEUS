@@ -62,6 +62,16 @@ FlowSimulationParameters = flow_params.FlowSimulationParameters;
 
 disp(['RF data will be saved in: ' newline savedir '.' newline])
 
+% Record what produced this run -- simulator commit, effective settings, and
+% environment -- beside the frames themselves, before any of them exist. A
+% manifest written at the end is lost for exactly the runs whose provenance is
+% hardest to reconstruct: the ones that crash or are cut short.
+addpath(fullfile(fileparts(fileparts(mfilename('fullpath'))), 'scripts'))
+Segment = struct('StartFrame', Acquisition.StartFrame, ...
+    'EndFrame', Acquisition.EndFrame);
+write_run_manifest(savedir, settingsfile, Segment);
+
+
 % Define the k-Wave grid:
 disp('Creating k-Wave grid ...')
 [kgrid, Grid] = define_grid(SimulationParameters, Geometry);
