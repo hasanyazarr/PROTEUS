@@ -40,6 +40,28 @@ MediumMetadata.Tiling = get_medium_tiling_metadata(FlowSimulationParameters);
 % Medium inhomegeneity
 %==========================================================================
 
+% The speckle below was drawn with no rng call at all until 2026-08-27, so two
+% runs of the same commit with the same settings sat in different tissue. That
+% made every run unreproducible and every dropped run unresumable: its second
+% half would have been simulated in a medium the first half never saw. It also
+% put a floor under any comparison between two configs, because the difference
+% between them included a fresh speckle field.
+%
+% 'shuffle' stays the default so nothing changes silently, but the integer the
+% stream started from is recorded either way, which is what makes a run
+% replayable after the fact.
+requestedSeed = 'shuffle';
+if isfield(Medium, 'RandomSeed')
+    requestedSeed = Medium.RandomSeed;
+end
+if isempty(which('resolve_random_seed'))
+    addpath(fullfile(fileparts(mfilename('fullpath'))));
+end
+[MediumMetadata.RandomSeed, MediumMetadata.RandomSeedSource] = ...
+    resolve_random_seed(requestedSeed, 'Medium.RandomSeed');
+fprintf('Tissue speckle seed: %d (%s)\n', ...
+    MediumMetadata.RandomSeed, MediumMetadata.RandomSeedSource);
+
 % Normal distribution truncated at +/-cutoff standard deviations:
 cutoff = Medium.InhomogeneityCutoff;
 pd = truncate(makedist('Normal'),-cutoff,cutoff);

@@ -85,6 +85,25 @@ validate_velocity_scale(VELOCITY_SCALE, velocityScaleSource);
 fprintf('MB velocity scale: %g x CFD field (%s)\n', ...
     VELOCITY_SCALE, velocityScaleSource);
 
+% Bubble start positions and radii were drawn with no rng call, exactly as the
+% tissue speckle was, so the ground truth of a run could not be reproduced
+% either. Seeding only the medium would have left the pairing of a frame's
+% bubbles to its RF unrepeatable, which is the half that carries the labels.
+%
+% 'shuffle' stays the default so nothing changes silently; the integer the
+% stream started from is recorded either way.
+requestedSeed = 'shuffle';
+if isfield(Acquisition, 'RandomSeed')
+    requestedSeed = Acquisition.RandomSeed;
+end
+if isempty(which('resolve_random_seed'))
+    addpath(fullfile(fileparts(fileparts(mfilename('fullpath'))), ...
+        'acoustic-module'));
+end
+[RANDOM_SEED, randomSeedSource] = ...
+    resolve_random_seed(requestedSeed, 'Acquisition.RandomSeed');
+fprintf('Ground truth seed: %d (%s)\n', RANDOM_SEED, randomSeedSource);
+
 % Where a bubble that has left the vessel is put back. Upstream reseeded at
 % the inlet, which forced every replacement bubble to traverse the tree from
 % the feeding vessel down. The tiling rewrite routed the reseed through
@@ -212,7 +231,8 @@ if useparfor
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, RESEED_FROM, TileCfg, n, n, NBubbles);
+            VELOCITY_SCALE, RESEED_FROM, RANDOM_SEED, TileCfg, n, n, ...
+            NBubbles);
     end
 
     % Assign the streamline values in the cells to the matrices:
@@ -251,7 +271,8 @@ else
             ] = ...
             track_bubble(Microbubble, Acquisition, Grid, ...
             vtuStruct, inlet, odefun, options, showStreamlines, ...
-            VELOCITY_SCALE, RESEED_FROM, TileCfg, n, n, NBubbles);
+            VELOCITY_SCALE, RESEED_FROM, RANDOM_SEED, TileCfg, n, n, ...
+            NBubbles);
 
     end
     
@@ -310,6 +331,8 @@ FlowSimulationParameters.Tiling = TileCfg;
 FlowSimulationParameters.Tiling.Transforms = TileCfg.Transforms;
 FlowSimulationParameters.Seeding = SeedCfg;
 FlowSimulationParameters.Seeding.ReseedFrom = RESEED_FROM;
+FlowSimulationParameters.RandomSeed = RANDOM_SEED;
+FlowSimulationParameters.RandomSeedSource = randomSeedSource;
 FlowSimulationParameters.Seeding.Stats = SeedStats;
 
 save([PATHS.GroundTruthPath, filesep, savefolder, ...
@@ -345,7 +368,17 @@ function [streamlines, velocities, rawVelocities, streamNumbers, tileIDs, ...
     radii, bubbleIndexes, trackIDs] = ...
     track_bubble(Microbubble, Acquisition, Grid, vtuStruct, inlet, ...
     odefun, options, showStreamlines, VELOCITY_SCALE, RESEED_FROM, ...
-    TileCfg, initialTileID, bubbleIndex, NBubbles)
+    RANDOM_SEED, TileCfg, initialTileID, bubbleIndex, NBubbles)
+
+% Give the slot its own stream, derived from the run's seed and the slot
+% index. Seeding once before the loop would not survive Acquisition.
+% ParallelTracking: a parfor worker gets its own generator, so a single rng
+% call in the caller leaves the workers as unseeded as before. Deriving the
+% stream here makes a slot's trajectory the same whichever worker runs it and
+% in whatever order.
+% mod because rng rejects a seed at or above 2^32 and a shuffled base seed
+% can already sit near it.
+rng(mod(RANDOM_SEED + bubbleIndex, 2^32), 'twister');
 
 % The first bubble of a slot starts in the vessel bulk, as upstream does.
 % Every replacement after it goes wherever the reseed policy says.
