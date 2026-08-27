@@ -43,7 +43,7 @@ def test_propagation_profiling_is_reachable_from_the_driver():
     stayed a single number."""
     import json
     nb = json.loads(
-        (ROOT.parent / "notebooks" / "proteus_data_generation_v7.ipynb").read_text())
+        (ROOT.parent / "notebooks" / "proteus_data_generation_v8.ipynb").read_text())
     src = "\n".join("".join(c["source"]) for c in nb["cells"]
                     if c["cell_type"] == "code")
 
