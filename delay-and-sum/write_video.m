@@ -4,7 +4,8 @@ function write_video(IMG,z,x,videoFileName)
 
 Nframes = size(IMG,3);
 
-v = VideoWriter(videoFileName, 'MPEG-4' );
+% MPEG-4 is not available in headless MATLAB on Colab.
+v = VideoWriter(videoFileName, 'Motion JPEG AVI');
 open(v)
 
 dbrange = 45;  % Dynamics range in dB

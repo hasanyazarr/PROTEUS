@@ -15,7 +15,7 @@ function process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, ...
 %   SETTINGS_PATH   GUI_output_parameters .mat file
 %   GT_FOLDER       Ground-truth bubble positions
 %   VIZ_OUT         Output dir for bmode_gt/, bmode_clean/, sample_grid.png,
-%                   and (in 'full' mode) mb_video.mp4
+%                   and (in 'full' mode) mb_video.avi
 %   MODE            'full' (default) or 'preview' -- preview skips video
 %   VIDEO_FPS       FPS of the per-frame video (default 60). 'full' only.
 %   PREPROCESSING_OPTIONS  Preprocessing policy. Optional; defaults to
@@ -314,22 +314,12 @@ function write_full_video(VIZ_OUT, IMG_disp, x_lat, z_ax, frameRate, ...
                           DYNRANGE_VIZ, VIDEO_FPS)
 
 Nframes_v = size(IMG_disp, 3);
-mp4_path = fullfile(VIZ_OUT, 'mb_video.mp4');
+% MPEG-4 is not available in headless MATLAB on Colab, so write AVI directly.
 avi_path = fullfile(VIZ_OUT, 'mb_video.avi');
-use_mp4 = true;
-try
-    vw = VideoWriter(mp4_path, 'MPEG-4');
-    vw.FrameRate = VIDEO_FPS;
-    vw.Quality   = 95;
-    open(vw);
-catch
-    fprintf('  MPEG-4 unavailable, falling back to Motion JPEG AVI...\n');
-    use_mp4 = false;
-    vw = VideoWriter(avi_path, 'Motion JPEG AVI');
-    vw.FrameRate = VIDEO_FPS;
-    vw.Quality   = 95;
-    open(vw);
-end
+vw = VideoWriter(avi_path, 'Motion JPEG AVI');
+vw.FrameRate = VIDEO_FPS;
+vw.Quality   = 95;
+open(vw);
 
 fig_v = figure('Visible','off', 'Color','k', 'InvertHardcopy','off', ...
     'Position', [100 100 800 1200]);
@@ -348,11 +338,7 @@ for k = 1:Nframes_v
     end
 end
 close(vw); close(fig_v);
-if use_mp4
-    fprintf('  saved video: %s\n', mp4_path);
-else
-    fprintf('  saved video: %s\n', avi_path);
-end
+fprintf('  saved video: %s\n', avi_path);
 
 end
 

@@ -24,7 +24,7 @@ GUIfilepath = [pathname GUIfilename];
 [IMG,z,x] = DAS_reconstruction(resultsFolder,GUIfilepath);
 
 % Create a video with all the frames
-videoFileName = [GUIfilename(1:end-4) '_DAS_recon.mp4'];
+videoFileName = [GUIfilename(1:end-4) '_DAS_recon.avi'];
 write_video(IMG,z,x,videoFileName)
 
 close all

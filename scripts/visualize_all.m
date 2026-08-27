@@ -2,7 +2,7 @@ function visualize_all(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, OUT_FOLDER, VID
 % visualize_all  Save sample frames + video:
 %   1) B-mode + Ground Truth overlay (bmode_gt/)
 %   2) Clean B-mode without GT/axes (bmode_clean/)
-%   3) SVD-filtered B-mode video, all frames (mb_video.mp4)
+%   3) SVD-filtered B-mode video, all frames (mb_video.avi)
 %   4) Sample grid
 %
 % Usage:
@@ -178,24 +178,12 @@ end
 % 3) SVD-FILTERED B-MODE VIDEO (all frames, with axes)
 %==========================================================================
 fprintf('\n=== 3/3: B-mode video (%d fps, %d frames) ===\n', VIDEO_FPS, Nframes);
-video_path_mp4 = fullfile(OUT_FOLDER, 'mb_video.mp4');
+% MPEG-4 is not available in headless MATLAB on Colab, so write AVI directly.
 video_path_avi = fullfile(OUT_FOLDER, 'mb_video.avi');
-
-% Try MPEG-4 first, fallback to Motion JPEG AVI
-use_mp4 = true;
-try
-    vw = VideoWriter(video_path_mp4, 'MPEG-4');
-    vw.FrameRate = VIDEO_FPS;
-    vw.Quality = 95;
-    open(vw);
-catch
-    fprintf('  MPEG-4 not available, falling back to Motion JPEG AVI...\n');
-    use_mp4 = false;
-    vw = VideoWriter(video_path_avi, 'Motion JPEG AVI');
-    vw.FrameRate = VIDEO_FPS;
-    vw.Quality = 95;
-    open(vw);
-end
+vw = VideoWriter(video_path_avi, 'Motion JPEG AVI');
+vw.FrameRate = VIDEO_FPS;
+vw.Quality = 95;
+open(vw);
 
 fig_v = figure('Visible','off', 'Color','k', 'InvertHardcopy','off', ...
     'Position', [100 100 800 1200]);
@@ -218,11 +206,7 @@ end
 close(vw);
 close(fig_v);
 
-if use_mp4
-    fprintf('  Saved video: %s\n', video_path_mp4);
-else
-    fprintf('  Saved video: %s\n', video_path_avi);
-end
+fprintf('  Saved video: %s\n', video_path_avi);
 
 %==========================================================================
 % 4) SAMPLE GRID (all frames, B-mode + GT)
