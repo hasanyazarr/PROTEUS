@@ -110,8 +110,13 @@ def test_self_sensing_is_masked_on_the_array_it_indexes():
 def test_self_sensing_is_zeroed_after_the_grid_is_expanded_back():
     """Zeroing p on d0's mask before the i_sampled expansion indexes
     distance-grid rows with a sensor-length mask. After the expansion the rows
-    are sensors again and the mask fits."""
+    are sensors again and the mask fits.
+
+    Since the accumulator was chunked along the sensor axis, the expanded
+    block holds one chunk of sensors, so the mask is sliced with it -- the
+    whole d0 would be the same length mismatch one level down.
+    """
     src = read("acoustic-module/run_simulation_homogeneous.m")
 
-    assert "p_sensor(d0 == 0,:) = 0;" in src
+    assert "p_sensor(d0(rows) == 0,:) = 0;" in src
     assert "p(d0 == 0,:) = 0;" not in src

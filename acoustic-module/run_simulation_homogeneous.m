@@ -28,16 +28,48 @@ useGPU = strcmp(run_param.DATA_CAST,'gpuArray-single') || ...
          strcmp(run_param.DATA_CAST,'gpuArray-double');
 
 % Preallocate sensor data:
+%
+% The accumulator is one row per sensor and one column per sample, and on
+% the GPU that is a single gpuArray -- which MATLAB caps at intmax('int32')
+% elements regardless of free device memory. v7's grid needed 1.06e9 and
+% fitted; v10's lambda/8 grid needs 2.52e9 and failed at this line before
+% frame 1. Holding it as a list of sensor chunks keeps every array under the
+% limit. Nothing about the physics changes: sensor rows are independent, and
+% the per-source work that dominates the loop is done over the distance
+% grid, which the split does not touch.
 dataType = class(source.mass_source); % 'single' or 'double'
+if isfield(run_param, 'SensorChunkElements')
+    chunkLimit = run_param.SensorChunkElements;   % tests only
+else
+    chunkLimit = [];
+end
+[chunk_first, chunk_last] = sensor_chunk_bounds( ...
+    N_sensor, kgrid.Nt, useGPU, chunkLimit);
+N_chunk = numel(chunk_first);
+if N_chunk > 1
+    run_log('banner', 'sensorchunks', ...
+        ['Sensor axis split into %d chunks of <=%d points: ' ...
+         '%d x %d exceeds the %d-element gpuArray limit'], ...
+        N_chunk, max(chunk_last - chunk_first + 1), ...
+        N_sensor, kgrid.Nt, intmax('int32'));
+end
+
+sensor_p = cell(1, N_chunk);
 if useGPU
     run_log('banner', 'gpudevice', ...
         'k-Wave GPU device %s selected and reset', ...
         num2str(run_param.DEVICE_NUM));
     gpuDevice(run_param.DEVICE_NUM + 1);
-    sensor_data.p      = gpuArray(zeros(N_sensor,kgrid.Nt, dataType));
+    for c = 1:N_chunk
+        sensor_p{c} = gpuArray(zeros( ...
+            chunk_last(c) - chunk_first(c) + 1, kgrid.Nt, dataType));
+    end
     source.mass_source = gpuArray(source.mass_source);
 else
-    sensor_data.p = zeros(N_sensor,kgrid.Nt, dataType);
+    for c = 1:N_chunk
+        sensor_p{c} = zeros( ...
+            chunk_last(c) - chunk_first(c) + 1, kgrid.Nt, dataType);
+    end
 end
 
 %% Precompute all mass source derivatives in batch (single matrix FFT)
@@ -139,16 +171,34 @@ for m = 1:N_source
 
     % Expand the distance grid back to sensor points before suppressing
     % self-sensing: only then is a row a sensor, which is what d0 indexes.
-    if run_param.gridded
-        p_sensor = p(i_sampled,:);
-    else
-        p_sensor = p;
+    % One chunk at a time, so the expanded block is allocatable even when the
+    % whole accumulator would not be.
+    for c = 1:N_chunk
+        rows = chunk_first(c):chunk_last(c);
+        if run_param.gridded
+            p_sensor = p(i_sampled(rows),:);
+        else
+            p_sensor = p(rows,:);
+        end
+        p_sensor(d0(rows) == 0,:) = 0;
+        sensor_p{c} = sensor_p{c} + p_sensor;
     end
-    p_sensor(d0 == 0,:) = 0;
-    sensor_data.p = sensor_data.p + p_sensor;
 
     stage_toc(profilePropagation, 'accum', t_accum, useGPU);
 
+end
+
+% Join the chunks. With more than one chunk the joined array is over the
+% device limit by construction, so it is only ever assembled on the host;
+% each chunk is released as it lands to keep the peak at one copy.
+if N_chunk == 1
+    sensor_data.p = sensor_p{1};
+else
+    sensor_data.p = zeros(N_sensor, kgrid.Nt, dataType);
+    for c = 1:N_chunk
+        sensor_data.p(chunk_first(c):chunk_last(c), :) = gather(sensor_p{c});
+        sensor_p{c} = [];
+    end
 end
 
 end
