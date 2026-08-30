@@ -255,10 +255,16 @@ class AcquisitionGeometry:
             "suggested filter +-{:.2f} mm".format(
                 self.element_height_mm, self.elevation_focus_mm,
                 self.suggested_elevation_mm()),
-            "image      lateral +-{:.2f} mm | axial 0..{:.2f} mm | "
-            "{} x {} px".format(
-                self.lateral_limit_mm, self.axial_limit_mm,
-                self.image_shape[0], self.image_shape[1]),
+            # The grid follows the vessel box, so neither extent is centred
+            # on zero and the axial one does not start at the probe face.
+            # Printing it as +-half-width and 0..depth described a grid this
+            # code stopped building when the ROI moved to the vessel box.
+            "image      lateral {:.2f}..{:.2f} mm | axial {:.2f}..{:.2f} mm | "
+            "{} x {} px ({})".format(
+                self.lateral_range_mm[0], self.lateral_range_mm[1],
+                self.axial_range_mm[0], self.axial_range_mm[1],
+                self.image_shape[0], self.image_shape[1],
+                self.image_roi_mode),
         ])
 
 
