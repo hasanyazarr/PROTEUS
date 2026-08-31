@@ -370,8 +370,18 @@ if SimulationParameters.HybridSimulation
                         exception, frame, pulse_seq_idx))
                 end
 
-                % Update sensor data transducer:
-                sensor_data.p = sensor_data_trans.p + sensor_data.p;
+                % Update sensor data transducer. Column-blocked and in
+                % place: both operands are the full [N_sensor x Nt] record,
+                % 9.4 GB each at v10's grid, and writing the sum into a
+                % third array put the host peak at three copies of it.
+                accum_cols = max(1, ...
+                    floor(2^26 / size(sensor_data.p,1)));
+                for col_start = 1:accum_cols:size(sensor_data.p,2)
+                    cols = col_start : min(col_start + accum_cols - 1, ...
+                        size(sensor_data.p,2));
+                    sensor_data.p(:,cols) = sensor_data.p(:,cols) + ...
+                        sensor_data_trans.p(:,cols);
+                end
 
                 % Compute element RF data recorded by transducer:
                 t_rf = tic;
