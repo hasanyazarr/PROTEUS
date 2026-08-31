@@ -208,6 +208,11 @@ if SimulationParameters.HybridSimulation
     n_transducer_time = floor(run_param.tr(3) / kgrid.dt) + 1;
     n_mb_time = floor(run_param.tr(1) / kgrid.dt) + 1;
 
+    % Check the receive path can be held before spending hours on the
+    % transmit that feeds it. Everything it needs is known here.
+    preflight_array_limits(Transducer, numel(mask_idx_trans), ...
+        n_transducer_time, length(sequence), Grid, run_param);
+
     % Simulation time and memory estimation:
     if estimate == true
         beta_coeff_file = ['time-estimation' filesep 'beta_coeff.mat'];
@@ -370,8 +375,18 @@ if SimulationParameters.HybridSimulation
                         exception, frame, pulse_seq_idx))
                 end
 
-                % Update sensor data transducer:
-                sensor_data.p = sensor_data_trans.p + sensor_data.p;
+                % Update sensor data transducer. Column-blocked and in
+                % place: both operands are the full [N_sensor x Nt] record,
+                % 9.4 GB each at v10's grid, and writing the sum into a
+                % third array put the host peak at three copies of it.
+                accum_cols = max(1, ...
+                    floor(2^26 / size(sensor_data.p,1)));
+                for col_start = 1:accum_cols:size(sensor_data.p,2)
+                    cols = col_start : min(col_start + accum_cols - 1, ...
+                        size(sensor_data.p,2));
+                    sensor_data.p(:,cols) = sensor_data.p(:,cols) + ...
+                        sensor_data_trans.p(:,cols);
+                end
 
                 % Compute element RF data recorded by transducer:
                 t_rf = tic;
@@ -412,6 +427,12 @@ else
     sensor = sensor_MB_all;
     kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;
     sensor_data_1iter = cell(1,length(sequence));
+
+    % Same check for the full_simulator path, whose receive window is the
+    % round trip rather than the one-way time.
+    preflight_array_limits(Transducer, numel(mask_idx_trans), ...
+        floor(run_param.tr(3) / kgrid.dt) + 1, length(sequence), ...
+        Grid, run_param);
 
     for pulse_seq_idx = 1 : length(sequence)
         % Simulation time and memory estimation:

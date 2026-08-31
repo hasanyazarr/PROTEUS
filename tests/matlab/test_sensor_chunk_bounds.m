@@ -41,6 +41,29 @@ Nt = LIMIT + 10;
 assert(isequal(first(:)', 1:3));
 assert(isequal(last(:)', 1:3));
 
+%% The element axis of compute_RF partitions through the same function.
+% A row there is one transducer element, and it costs N_int*N elements of the
+% [N_el*N_int x N] intermediate rather than one -- which is all the caller has
+% to say for the partition to be the same partition.
+N_el  = 192;
+N_int = 990;      % v10: 6 lateral x 165 elevation integration points
+N     = 12500;
+assert(N_el * N_int * N > LIMIT, 'v10 must be over the limit whole');
+
+[first, last] = sensor_chunk_bounds(N_el, N_int*N, true);
+assert(first(1) == 1);
+assert(last(end) == N_el);
+assert(isequal(first(2:end), last(1:end-1) + 1));
+elementsPerBlock = last - first + 1;
+assert(all(elementsPerBlock * N_int * N <= LIMIT), ...
+    'an element block is still over the device limit');
+
+% An explicit budget overrides the CPU shortcut, which is how compute_RF
+% bounds working memory on the host retry as well.
+[first, last] = sensor_chunk_bounds(N_el, N_int*N, false, 4*N_int*N);
+assert(numel(first) == ceil(N_el/4), 'the CPU shortcut was not overridden');
+assert(last(end) == N_el);
+
 disp('test_sensor_chunk_bounds: all assertions passed');
 
 function check_cover(first, last, N_sensor, Nt, LIMIT)
