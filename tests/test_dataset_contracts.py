@@ -315,8 +315,12 @@ def test_the_transmit_record_is_sized_before_it_is_run():
     for knob in ("MicrobubbleDeltaTruncation", "CombineTransmitSensors",
                  "TransmitBatchSize", "Tiling.NumTiles"):
         assert knob in src, knob
-    # Called before the transmit, not after it.
+    # Sized from the bubble counts, so it runs between the union mask and
+    # build_bubble_projection -- which walks every frame of the batch, ~25 min
+    # at v11's scale -- rather than after it.
+    assert "combined, bubble_counts, run_param)" in src
     assert (main.index("preflight_transmit_record(")
+            < main.index("Projection = build_bubble_projection(")
             < main.index("Simulating combined transducer and MB transmit wave."))
 
 

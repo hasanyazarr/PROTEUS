@@ -1,5 +1,5 @@
 function preflight_transmit_record(n_mb_mask, n_trans_mask, ...
-    n_mb_time, n_transducer_time, combined, Projection, run_param)
+    n_mb_time, n_transducer_time, combined, bubble_counts, run_param)
 %PREFLIGHT_TRANSMIT_RECORD Refuse a transmit whose record will not fit.
 %
 %   preflight_array_limits sizes the receive path, all of it shaped by the
@@ -10,6 +10,11 @@ function preflight_transmit_record(n_mb_mask, n_trans_mask, ...
 %   ~145 GB disk and found out 36 minutes in, at 25% of the first pulse,
 %   as "Cannot write into dataset". Everything needed to say so in seconds
 %   is known here.
+%
+%   Called on bubble_counts rather than on the built projection, so it runs
+%   between the union mask and build_bubble_projection rather than after it.
+%   The projection walks every frame of the batch, which is ~25 min at v11's
+%   scale, and a batch that cannot be recorded should not pay for it.
 %
 %   Reported, not enforced, is the host memory the projection needs. MATLAB
 %   on Linux cannot ask how much is free, so the number is for the reader --
@@ -28,17 +33,15 @@ else
 end
 record_bytes = record_rows * record_time * bytesPerSample;
 
-W = Projection(1).W;
-projection_bytes = 0;
-for k = 1:numel(Projection)
-    projection_bytes = projection_bytes + ...
-        nnz(Projection(k).W) * 12 + ...          % value plus row index
-        size(Projection(k).W, 2) * 8;            % column pointers
-end
-sensed_bytes = 0;
-for k = 1:numel(Projection)
-    sensed_bytes = sensed_bytes + size(Projection(k).W, 1) * n_mb_time * 4;
-end
+% The projection is one weight per bubble per stencil point, plus a column
+% pointer per mask entry, and it holds one row per bubble per frame.
+stencil    = (2 * run_param.MicrobubbleDeltaTruncation + 1)^3;
+n_pulses   = size(bubble_counts, 2);
+total_rows = sum(bubble_counts(:));
+nonzeros_  = total_rows * stencil;
+
+projection_bytes = nonzeros_ * 12 + n_mb_mask * 8 * n_pulses;
+sensed_bytes     = total_rows * n_mb_time * 4;
 
 fprintf('=== Transmit-record preflight ===\n');
 fprintf('  path                          %s\n', path_name);
@@ -46,8 +49,8 @@ fprintf('  microbubble sensor points     %d (%.1fx the transducer''s %d)\n', ...
     n_mb_mask, n_mb_mask / max(n_trans_mask, 1), n_trans_mask);
 fprintf('  record the binary will write  %.1f GB  (%d x %d)\n', ...
     record_bytes / 2^30, record_rows, record_time);
-fprintf('  projection matrices           %.1f GB, %d nonzeros\n', ...
-    projection_bytes / 2^30, nnz(W) * numel(Projection));
+fprintf('  projection matrices           %.1f GB, %.3g nonzeros\n', ...
+    projection_bytes / 2^30, nonzeros_);
 fprintf('  projected pressure held       %.1f GB\n', sensed_bytes / 2^30);
 
 where = '(no data path set)';

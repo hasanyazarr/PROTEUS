@@ -11,9 +11,10 @@ rpz = struct('DATA_PATH', tempdir, ...
              'MicrobubbleDeltaTruncation', 4, ...
              'CombineTransmitSensors', false);
 
-% One pulse, 40 bubble rows over a 1e6-point mask.
-Wz = sparse(1:40, 1:40, ones(1,40), 40, 1e6);
-Pz = struct('W', Wz);
+% One pulse, 40 bubbles in each of 10 frames, over a 1e6-point mask. Sized
+% from the bubble counts rather than a built projection, so the check runs
+% between the union mask and the projection pass rather than after it.
+Pz = repmat(40, 10, 1);
 
 % 1e6 x 10000 x 4 bytes = 40 GB, and 1.1x of that against 100 GB free.
 rpz.FreeDiskBytes = 100 * 2^30;

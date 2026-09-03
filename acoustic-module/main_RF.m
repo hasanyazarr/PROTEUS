@@ -273,21 +273,24 @@ if SimulationParameters.HybridSimulation
 
         mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
 
+        % Size the record first. Everything it depends on is known once the
+        % union mask exists, and the projection below walks every frame of
+        % the batch -- ~25 min at v11's scale -- so a batch that cannot be
+        % recorded must not pay for it before being refused.
+        preflight_transmit_record(numel(mask_idx_MB_batch), ...
+            numel(mask_idx_trans), n_mb_time, n_transducer_time, ...
+            combine_transmit_sensors, bubble_counts, run_param);
+
         % One matrix per pulse taking the recorded transmit to the pressure
-        % each bubble senses. Built before the transmit, so a batch that
-        % cannot be recorded is refused before hours are spent on it, and so
-        % the frame loop no longer re-reads the ground truth, rebuilds a
-        % per-frame sensor mask, or re-intersects the batch mask against it.
+        % each bubble senses. Built before the transmit, so the frame loop
+        % no longer re-reads the ground truth, rebuilds a per-frame sensor
+        % mask, or re-intersects the batch mask against it.
         t_proj = tic;
         Projection = build_bubble_projection(Grid, groundtruthfolder, ...
             AcquisitionBatch, length(sequence), Geometry, ...
             mask_idx_MB_batch, run_param.MicrobubbleDeltaTruncation);
         fprintf('[TIMING] Bubble projection (frames %d-%d): %.2f s\n', ...
             batch_start, batch_end, toc(t_proj));
-
-        preflight_transmit_record(numel(mask_idx_MB_batch), ...
-            numel(mask_idx_trans), n_mb_time, n_transducer_time, ...
-            combine_transmit_sensors, Projection, run_param);
 
         % What the frame loop reads: one row per bubble per frame, the
         % pressure that bubble sensed. Megabytes, where the record it comes
