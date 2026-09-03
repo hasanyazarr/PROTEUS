@@ -26,6 +26,9 @@ function process_run(RESULTS_FOLDER, SETTINGS_PATH, GT_FOLDER, ...
 %                   SplitID: label for the preprocessing fit split.
 %                   NormalizationMode: 'fit_frames_global_max' or 'per_frame'.
 %                   SVD.Cutoff or SVD.Mode = 'adaptive_energy'.
+%                   Clutter.Mode: 'svd' (default), 'mean' or 'highpass'.
+%                   Clutter.CutoffHz: slow-time cutoff, required by
+%                   Clutter.Mode = 'highpass'. See apply_clutter_filter.
 %                   ImageROI: struct with Depth and Lateral, each [min max] in
 %                   metres, overriding the vessel-box grid. Optional.
 
@@ -127,25 +130,21 @@ PreprocessingState.SampleRangeSource = 'beamformer_delay_span';
 PreprocessingState.SampleRangeMargin = SAMPLE_RANGE_MARGIN;
 
 %==========================================================================
-% SVD CLUTTER FILTER
+% CLUTTER FILTER
+%
+% Applied to the AM residual, before envelope detection. hilbert() is not
+% linear, so this cannot be deferred to the beamformed stack; DAS and TGC
+% are, so it makes no difference whether it happens before or after them.
 %==========================================================================
-RF_fit_cas = double(reshape(RF(:,:,fit_frame_mask), ...
-    [Nelem*Nt, sum(fit_frame_mask)]));
-[U_fit, S_fit, ~] = svd(RF_fit_cas, 'econ');
-singular_values = diag(S_fit);
-[n_remove, PreprocessingState.SVD] = select_svd_cutoff(...
-    singular_values, PREPROCESSING_OPTIONS);
-fprintf('SVD clutter filter (cutoff=%d, mode=%s)...\n', ...
-    n_remove, PreprocessingState.SVD.Mode);
 RF_cas = double(reshape(RF, [Nelem*Nt, Nframes]));
-if n_remove > 0
-    clutter_basis = U_fit(:, 1:n_remove);
-    RF_cas = RF_cas - clutter_basis * (clutter_basis' * RF_cas);
-end
+clear RF;
+[RF_cas, PreprocessingState.Clutter, PreprocessingState.SVD] = ...
+    apply_clutter_filter(RF_cas, fit_frame_mask, PREPROCESSING_OPTIONS, ...
+    Acquisition.FrameRate);
 RF_filt = single(reshape(RF_cas, [Nelem, Nt, Nframes]));
 PreprocessingState.SVDFitFrameNumbers = sourceFrameNumbers(fit_frame_mask);
 PreprocessingState.SVDFitScope = 'specified_source_frames';
-clear RF RF_fit_cas RF_cas U_fit S_fit clutter_basis;
+clear RF_cas;
 
 %==========================================================================
 % TIME AXIS + TGC
@@ -530,6 +529,124 @@ ROIState.VesselBoxDepth   = [ctr(1) - half(1), ctr(1) + half(1)];
 ROIState.VesselBoxLateral = [ctr(2) - half(2), ctr(2) + half(2)];
 ROIState.DepthRange       = roi_z;
 ROIState.LateralRange     = roi_x;
+end
+
+
+function [RF_cas, ClutterState, SVDState] = apply_clutter_filter(...
+    RF_cas, fit_frame_mask, options, frameRate)
+%APPLY_CLUTTER_FILTER Suppress the frame-invariant part of the RF stack.
+%
+% RF_cas is the Casorati matrix [Nelem*Nt, Nframes]: one row per (element,
+% sample), one column per frame. Every policy here removes a subspace of the
+% frame axis; they differ only in which one.
+%
+%   'svd'      (default, and what every run before 2026-09-01 used) removes
+%              the Cutoff strongest components of the fit frames.
+%   'mean'     removes the frame mean, i.e. the single slow-time direction
+%              that is exactly constant.
+%   'highpass' removes everything below Clutter.CutoffHz in slow time.
+%
+% Why more than one: measured on run_20260831_142721 (v10, 82 frames, AM),
+% 38% of the post-AM energy inside the beamformer's sample window does not
+% change from frame to frame at all, and it sits at the shallow and deep
+% edges of the image rather than on the vessel. 'svd' with Cutoff = 1 leaves
+% 11% of that amplitude standing -- enough to render as a bubble-sized spot
+% at the vessel inlet in every single frame, which a localizer then reports
+% as a bubble that never moves.
+%
+% Raising the SVD cutoff is not the cheap fix it looks like. On that run
+% modes 2 and 3 carry little of the static component and a lot of the bubble
+% signal, so Cutoff = 2 halves the bubble-band energy to buy a 2.5x quieter
+% shallow edge. The frame mean buys a larger reduction and costs nothing,
+% because it is a fixed direction rather than a fitted one: the leading
+% singular vector is chosen to maximize energy and so absorbs whatever
+% bubble structure happens to correlate with the clutter, while the
+% all-ones direction can only take the slow-time DC of a moving scatterer.
+
+mode = 'svd';
+if isfield(options, 'Clutter') && isfield(options.Clutter, 'Mode') && ...
+        ~isempty(options.Clutter.Mode)
+    mode = lower(options.Clutter.Mode);
+end
+
+Nframes = size(RF_cas, 2);
+SVDState = struct('Mode', 'not_applied', 'EnergyThreshold', [], ...
+    'SelectedCutoff', 0, 'SingularValues', []);
+ClutterState = struct('Mode', mode, 'CutoffHz', [], 'RemovedRank', 0, ...
+    'FitFrameCount', sum(fit_frame_mask));
+
+switch mode
+    case 'svd'
+        RF_fit_cas = RF_cas(:, fit_frame_mask);
+        [U_fit, S_fit, ~] = svd(RF_fit_cas, 'econ');
+        singular_values = diag(S_fit);
+        [n_remove, SVDState] = select_svd_cutoff(singular_values, options);
+        fprintf('Clutter filter: svd (cutoff=%d, mode=%s)...\n', ...
+            n_remove, SVDState.Mode);
+        if n_remove > 0
+            clutter_basis = U_fit(:, 1:n_remove);
+            RF_cas = RF_cas - clutter_basis * (clutter_basis' * RF_cas);
+        end
+        ClutterState.RemovedRank = n_remove;
+
+    case 'mean'
+        fprintf('Clutter filter: mean (fit on %d of %d frames)...\n', ...
+            sum(fit_frame_mask), Nframes);
+        RF_cas = RF_cas - mean(RF_cas(:, fit_frame_mask), 2);
+        ClutterState.RemovedRank = 1;
+
+    case 'highpass'
+        if ~isfield(options, 'Clutter') || ...
+                ~isfield(options.Clutter, 'CutoffHz') || ...
+                isempty(options.Clutter.CutoffHz)
+            error('process_run:MissingClutterCutoff', ...
+                'Clutter.Mode = highpass requires Clutter.CutoffHz.');
+        end
+        fc = options.Clutter.CutoffHz;
+        % Shape and finiteness first, because the range test below cannot
+        % reject either: every comparison against NaN is false, so a NaN
+        % cutoff passes it, and then f >= NaN keeps no slow-time bin at all
+        % and the filter silently returns an all-zero RF stack. A vector
+        % cutoff passes it too, and then broadcasts against f instead of
+        % erroring whenever it happens to be Nframes long.
+        if ~isnumeric(fc) || ~isscalar(fc) || ~isfinite(fc)
+            error('process_run:InvalidClutterCutoff', ...
+                ['Clutter.CutoffHz must be a finite numeric scalar ' ...
+                 '(got %s of size %s).'], class(fc), mat2str(size(fc)));
+        end
+        if fc <= 0 || fc >= frameRate/2
+            error('process_run:InvalidClutterCutoff', ...
+                ['Clutter.CutoffHz = %g is outside (0, %g), the slow-time ' ...
+                 'band a %g Hz acquisition has.'], fc, frameRate/2, frameRate);
+        end
+        % Done in the Fourier domain rather than with butter/filtfilt: no
+        % Signal Processing Toolbox dependency, and the stopband is exact
+        % instead of asymptotic, which is what matters when the thing being
+        % rejected is a hundred times the signal. The mean goes first so the
+        % transform does not see a step between the last frame and the first.
+        RF_cas = RF_cas - mean(RF_cas(:, fit_frame_mask), 2);
+        f = (0:Nframes-1) / Nframes * frameRate;
+        f = min(f, frameRate - f);          % fold onto [0, frameRate/2]
+        keep = double(f >= fc);
+        fprintf(['Clutter filter: highpass (%.3g Hz, rejecting %d of %d ' ...
+            'slow-time bins)...\n'], fc, sum(keep == 0), Nframes);
+        % Row-blocked: the complex spectrum of the whole Casorati matrix is
+        % four times its own size, and on a production run that matrix is
+        % already the largest array in the process.
+        block = 200000;
+        for i0 = 1:block:size(RF_cas, 1)
+            i1 = min(i0 + block - 1, size(RF_cas, 1));
+            RF_cas(i0:i1, :) = real(ifft( ...
+                fft(RF_cas(i0:i1, :), [], 2) .* keep, [], 2));
+        end
+        ClutterState.CutoffHz = fc;
+        ClutterState.RemovedRank = sum(keep == 0);
+
+    otherwise
+        error('process_run:InvalidClutterMode', ...
+            'Clutter.Mode must be svd, mean or highpass (got ''%s'').', mode);
+end
+
 end
 
 

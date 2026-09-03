@@ -162,14 +162,47 @@ def test_process_run_validates_the_preprocessing_split_policy():
 
 
 def test_process_run_uses_explicit_svd_policy_not_hidden_constant():
+    """The SVD cutoff is a stated policy that the run records, not a constant.
+
+    The cutoff selection moved inside apply_clutter_filter when the clutter
+    filter grew modes, so select_svd_cutoff now hands its record back through
+    that function rather than writing PreprocessingState directly. What the
+    test protects is unchanged: no hidden constant, an adaptive option, and the
+    chosen cutoff recorded in PreprocessingState.SVD.
+    """
     src = read("scripts/process_run.m")
 
     assert "SVD_CUTOFF       = 2" not in src
-    assert "PreprocessingState.SVD.Mode" in src
-    assert "[n_remove, PreprocessingState.SVD] = select_svd_cutoff(" in src
+    assert "[n_remove, SVDState] = select_svd_cutoff(" in src
     assert "SVDState.SelectedCutoff = cutoff;" in src
     assert "adaptive_energy" in src
-    assert "select_svd_cutoff" in src
+    assert ("[RF_cas, PreprocessingState.Clutter, PreprocessingState.SVD] = ..."
+            in src)
+
+
+def test_process_run_clutter_filter_offers_modes_and_validates_them():
+    """svd is one clutter mode among three, and each records what it removed.
+
+    A static scatterer survives an SVD that keeps rank 1, which is what put the
+    stationary artifact in the 2026-08-31 run; the frame mean removes it
+    outright because it is a fixed direction rather than a fitted one.
+    """
+    src = read("scripts/process_run.m")
+
+    assert ("function [RF_cas, ClutterState, SVDState] = apply_clutter_filter("
+            in src)
+    assert "case 'svd'" in src
+    assert "case 'mean'" in src
+    assert "case 'highpass'" in src
+    assert "process_run:InvalidClutterMode" in src
+    # highpass needs a cutoff, and it has to be one usable number: NaN passes
+    # every range comparison and would zero the whole RF stack in silence.
+    assert "process_run:MissingClutterCutoff" in src
+    assert "~isscalar(fc) || ~isfinite(fc)" in src
+    assert "process_run:InvalidClutterCutoff" in src
+    # What each mode took out is provenance, not a print.
+    assert "ClutterState.RemovedRank" in src
+    assert "ClutterState.CutoffHz = fc;" in src
 
 
 def test_file_hash_helper_exists():
