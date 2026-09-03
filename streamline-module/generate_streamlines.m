@@ -154,17 +154,6 @@ if SeedCfg.Enabled
         SeedStats.MedianSpeed, SeedStats.MaxSpeed);
 end
 
-% Domain-aware seed cropping (general, config-adaptive). When enabled, restrict
-% seeding to vessel cells inside the simulated domain box (Geometry.Domain) so
-% microbubbles start where they are actually imaged, without hand-tuning tiling
-% offset ranges. Pair with zero tiling offsets (the crop is the confinement).
-if isfield(Acquisition, 'ConfineSeedsToDomain') && Acquisition.ConfineSeedsToDomain
-    [vtuStruct, CropStats] = crop_vessel_to_domain(vtuStruct, Geometry, 0.15);
-    fprintf(['Domain-crop seeding: %.1f%% of vessel cells inside domain box ' ...
-        '(%d seedable cells)\n'], 100*CropStats.InBoxFraction, ...
-        CropStats.SeedableCells);
-end
-
 % --- Vessel tiling: replicate the canonical vessel across the imaging FOV
 % with a random per-streamline offset (and optional rotation about the
 % elevation axis) so MBs cover the whole image plane and flow in different
@@ -197,7 +186,62 @@ if isfield(Acquisition, 'Tiling') && ~isempty(Acquisition.Tiling)
     end
     TileCfg = merge_struct(TileCfg, Acquisition.Tiling);
 end
+
+% --- Seed cropping. Both crops need TileCfg resolved: one is refused when
+% tiling is on, the other is only valid because tiling cannot move it.
+
+% Domain-aware seed cropping (general, config-adaptive). When enabled, restrict
+% seeding to vessel cells inside the simulated domain box (Geometry.Domain) so
+% microbubbles start where they are actually imaged, without hand-tuning tiling
+% offset ranges. Pair with zero tiling offsets (the crop is the confinement).
+%
+% It cannot be composed with tiling: it zeroes seeding weight by image-frame
+% depth and lateral position, and a tile then rotates and translates the vessel
+% by up to the offset ranges, which leaves the crop describing nowhere. Refused
+% rather than silently meaningless -- validate_tile_placement below is what
+% keeps a tiled run inside the domain.
+if isfield(Acquisition, 'ConfineSeedsToDomain') && Acquisition.ConfineSeedsToDomain
+    if TileCfg.Enabled
+        error('generate_streamlines:DomainCropWithTiling', ...
+            ['Acquisition.ConfineSeedsToDomain and Acquisition.Tiling.Enabled ' ...
+             'are both set. The domain crop runs on the canonical vessel and ' ...
+             'tiling moves it afterwards, so the crop would mean nothing. Use ' ...
+             'Acquisition.ElevationSlab plus narrower tiling offset ranges.']);
+    end
+    [vtuStruct, CropStats] = crop_vessel_to_domain(vtuStruct, Geometry, 0.15);
+    fprintf(['Domain-crop seeding: %.1f%% of vessel cells inside domain box ' ...
+        '(%d seedable cells)\n'], 100*CropStats.InBoxFraction, ...
+        CropStats.SeedableCells);
+end
+
+% Elevation-slab seed cropping. Acquisition.ElevationSlab is the full slab
+% thickness in metres; unset means no crop, which is upstream's behaviour.
+%
+% This is the largest single lever on in-plane microbubble density. renal_tree
+% spans 6.5 mm in elevation against a slab of roughly 1 mm, so ~96% of any
+% bubble budget lands out of plane: measured 2026-09-03, clipping to the slab
+% multiplies the in-plane count by 21, against 6 for taking Microbubble.Number
+% from 200 to 1200 (docs/vessel_tiling.md). Unlike the domain crop it composes
+% with tiling, because a tile rotates about the elevation axis and so preserves
+% a cell's elevation.
+if isfield(Acquisition, 'ElevationSlab') && ~isempty(Acquisition.ElevationSlab)
+    SlabHalfThickness = Acquisition.ElevationSlab / 2;
+    [vtuStruct, SlabStats] = ...
+        crop_vessel_to_slab(vtuStruct, Geometry, SlabHalfThickness);
+    fprintf(['Elevation-slab seeding: %.1f mm slab keeps %.1f%% of vessel ' ...
+        'cells (%d seedable cells)\n'], 1e3*Acquisition.ElevationSlab, ...
+        100*SlabStats.InSlabFraction, SlabStats.SeedableCells);
+end
+
 TileCfg.Transforms = build_tile_transforms(TileCfg);
+
+% Where the sampled tiles actually landed. Errors before the first frame if any
+% of them overhangs the simulated domain.
+TilePlacement = validate_tile_placement(TileCfg, vtuStruct, Geometry);
+if TileCfg.Enabled
+    fprintf('Tile placement: %d tiles, %.2f mm clearance from the domain wall\n', ...
+        TilePlacement.NumTiles, -1e3*TilePlacement.MaxOverhang);
+end
 
 % Canonical (un-tiled) ODE function. Per-streamline tiled odefun is built
 % inside track_bubble.
@@ -357,6 +401,11 @@ FlowSimulationParameters.Tiling = TileCfg;
 FlowSimulationParameters.Tiling.Transforms = TileCfg.Transforms;
 FlowSimulationParameters.Seeding = SeedCfg;
 FlowSimulationParameters.Seeding.ReseedFrom = RESEED_FROM;
+if isfield(Acquisition, 'ElevationSlab') && ~isempty(Acquisition.ElevationSlab)
+    FlowSimulationParameters.Seeding.ElevationSlab = Acquisition.ElevationSlab;
+else
+    FlowSimulationParameters.Seeding.ElevationSlab = [];
+end
 FlowSimulationParameters.RandomSeed = RANDOM_SEED;
 FlowSimulationParameters.RandomSeedSource = randomSeedSource;
 FlowSimulationParameters.Seeding.Stats = SeedStats;

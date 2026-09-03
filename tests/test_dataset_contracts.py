@@ -358,3 +358,52 @@ def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
     assert "Simulating transducer-only transmit wave." in src
     assert "Simulating MB-only transmit wave." in src
 
+
+
+def test_the_elevation_slab_crop_runs_before_tiling():
+    """Cropping in elevation commutes with a tile transform; cropping in
+    depth or lateral does not.
+
+    A tile rotates about the elevation axis, so a cell's elevation survives
+    the transform and a slab crop applied to the canonical vessel stays
+    correct afterwards. Depth and lateral mix under that rotation, which is
+    why crop_vessel_to_domain cannot be composed with tiling the same way -
+    see the guard below. Measured 2026-09-03: clipping the renal tree to the
+    imaged slab is worth 21x the in-plane bubble count, against 6x for
+    raising Microbubble.Number from 200 to 1200."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "crop_vessel_to_slab(vtuStruct, Geometry, SlabHalfThickness)" in src
+    assert "Acquisition.ElevationSlab" in src
+    assert (src.index("crop_vessel_to_slab(vtuStruct, Geometry, SlabHalfThickness)")
+            < src.index("TileCfg.Transforms = build_tile_transforms(TileCfg);"))
+
+
+def test_domain_cropping_and_tiling_are_refused_together():
+    """crop_vessel_to_domain zeroes seeding weight by image-frame position,
+    and it runs before the tile transforms exist. Offsetting a cropped vessel
+    by up to 25 mm afterwards leaves the crop meaningless, so the pair is an
+    error rather than a silently wrong run."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "generate_streamlines:DomainCropWithTiling" in src
+
+
+def test_tile_placement_is_validated_against_the_domain():
+    """run_20260708_043218 put 0.30% of its labelled bubbles outside the
+    simulated domain and 0.8% inside the transmit ringdown, because nothing
+    checked where the sampled tile offsets landed. The transforms are known
+    before the first frame, so the check is free."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "validate_tile_placement(TileCfg, vtuStruct, Geometry)" in src
+    assert (src.index("validate_tile_placement(TileCfg, vtuStruct, Geometry)")
+            > src.index("TileCfg.Transforms = build_tile_transforms(TileCfg);"))
+
+
+def test_the_elevation_slab_reaches_the_ground_truth():
+    """A knob that changes where bubbles are seeded has to be recoverable from
+    the run's own data, the way Tiling, Seeding and VelocityScale already are."""
+    src = read("streamline-module/generate_streamlines.m")
+
+    assert "FlowSimulationParameters.Seeding.ElevationSlab" in src
