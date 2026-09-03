@@ -19,7 +19,11 @@ Nframes     = Acquisition.NumberOfFrames; % Total number of ground truth frames
 frame_start = Acquisition.StartFrame;
 frame_end   = Acquisition.EndFrame;
 
-sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz);
+% Logical, not double: at v11's lambda/8 grid the mask is ~300M points,
+% which is 2.4 GB as double against 0.3 GB as logical, and it is
+% allocated and zeroed once per frame per pulse. define_sensor_transducer
+% has always built its mask this way.
+sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz, 'logical');
 max_mb = 1;
 bubble_counts = zeros(frame_end - frame_start + 1, N_sequence);
 

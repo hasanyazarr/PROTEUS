@@ -115,6 +115,13 @@ run_param = compute_travel_times(run_param, ...
 
 run_param.PML = Grid.PML;
 
+% Homogeneous-medium approximation, computed once for the whole run.
+% run_simulation_homogeneous needs it on every call, and averaging the full
+% sound_speed, density and alpha_coeff grids is ~7 GB of host reads at
+% v11's lambda/8 grid. The medium is fixed from define_medium onwards, so
+% the average is too.
+run_param.MediumAverage = average_medium(medium);
+
 % create the time array
 kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;
 
@@ -262,8 +269,10 @@ if SimulationParameters.HybridSimulation
             % One sensor over both masks, recorded for the round trip the
             % transducer needs. A grid point carried by both masks is stored
             % once and read by both extractions below.
-            sensor_combined.mask = logical(...
-                sensor_MB_batch.mask + sensor_transducer.mask);
+            % Union by OR, not by sum: both masks are logical, and '+'
+            % would promote the whole grid to double for the temporary.
+            sensor_combined.mask = ...
+                sensor_MB_batch.mask | sensor_transducer.mask;
             sensor_combined.record = sensor_MB_batch.record;
             mask_idx_combined = find(sensor_combined.mask);
             mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));

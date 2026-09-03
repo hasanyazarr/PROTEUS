@@ -17,7 +17,9 @@ function [sensor, sensor_weights, MB, max_dist] = ...
 %
 % =========================================================================
 
-sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz);
+% Logical, not double -- see define_sensor_MB_all. update_sensor assigns
+% 1/true into it and every reader takes find() or logical() of it.
+sensor.mask = zeros(Grid.Nx, Grid.Ny, Grid.Nz, 'logical');
 
 % Put the microbubbles on the grid:
 [MB.points, MB.nodes, MB.idx, idx_exclude] = ...

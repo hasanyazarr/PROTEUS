@@ -378,8 +378,9 @@ def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
     assert "combine_transmit_sensors = num_batches == 1;" in src
     assert "Simulating combined transducer and MB transmit wave." in src
     # The combined sensor is the union of the two masks, recorded for the
-    # round trip the transducer needs.
-    assert "sensor_combined.mask = logical(" in src
+    # round trip the transducer needs. OR, not sum: both masks are logical
+    # and '+' would promote the whole grid to double for the temporary.
+    assert "sensor_MB_batch.mask | sensor_transducer.mask;" in src
     assert "sensor_combined.record = sensor_MB_batch.record;" in src
     # Both sensor sets come out of that one run.
     assert "sensor_data_transducer_1iter{pulse_seq_idx} = ..." in src

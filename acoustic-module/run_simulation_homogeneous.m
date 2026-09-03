@@ -16,9 +16,16 @@
 function sensor_data = run_simulation_homogeneous(...
     run_param, kgrid, medium, source, sensor)
 
-% Compute the average properties of the medium (homogeneous medium
-% approximation):
-medium = average_medium(medium);
+% Reduce the medium to the homogeneous approximation. main_RF computes
+% this once for the whole run and passes it down, because averaging the
+% full property grids costs ~7 GB of host reads per call at v11's grid and
+% the medium never changes after define_medium. Falling back to the direct
+% call keeps callers that build run_param themselves working.
+if isfield(run_param, 'MediumAverage')
+    medium = run_param.MediumAverage;
+else
+    medium = average_medium(medium);
+end
 
 N_source    = size(source.points,1);   	% Number of sources
 N_sensor    = size(sensor.points,1);   	% Number of sensors
@@ -56,13 +63,31 @@ end
 
 sensor_p = cell(1, N_chunk);
 if useGPU
-    run_log('banner', 'gpudevice', ...
-        'k-Wave GPU device %s selected and reset', ...
-        num2str(run_param.DEVICE_NUM));
-    gpuDevice(run_param.DEVICE_NUM + 1);
+    % Select the device, but do not reset one that is already selected.
+    % gpuDevice(index) resets the device and invalidates every live
+    % gpuArray, and this function is called once per pulse per frame -- 750
+    % times over a 250-frame AM run. Nothing on the device survives that
+    % today only because the bubble solver gathers its output and
+    % hybrid_simulator gathers between interactions; the moment anything in
+    % the chain keeps data on the device (compute_RF already assumes the
+    % receive record may still be there), the reset would silently destroy
+    % it. Keeping the device selected also keeps the allocator's cache, so
+    % the large chunk allocations below are reused rather than remapped.
+    selected = gpuDevice;
+    if selected.Index ~= run_param.DEVICE_NUM + 1
+        gpuDevice(run_param.DEVICE_NUM + 1);
+        run_log('banner', 'gpudevice', ...
+            'k-Wave GPU device %s selected and reset', ...
+            num2str(run_param.DEVICE_NUM));
+    end
+    % Allocated on the device, not built on the host and copied. The
+    % accumulator is 9.4 GiB at v11's grid, so the copy it replaces was a
+    % full host memset plus a host-to-device transfer of that size on every
+    % call, for a buffer whose whole content is zeros.
     for c = 1:N_chunk
-        sensor_p{c} = gpuArray(zeros( ...
-            chunk_last(c) - chunk_first(c) + 1, kgrid.Nt, dataType));
+        sensor_p{c} = zeros( ...
+            chunk_last(c) - chunk_first(c) + 1, kgrid.Nt, ...
+            dataType, 'gpuArray');
     end
     source.mass_source = gpuArray(source.mass_source);
 else
@@ -234,20 +259,6 @@ run_log('stage', name, toc(t));
 
 end
 
-
-function medium_average = average_medium(medium)
-% Compute the average value of medium properties.
-
-medium_average.rho = mean(medium.density,     'all');
-medium_average.c   = mean(medium.sound_speed, 'all');
-medium_average.a   = mean(medium.alpha_coeff, 'all');
-medium_average.b   = mean(medium.alpha_power, 'all');
-
-if isfield(medium,'alpha_mode')
-    medium_average.alpha_mode = medium.alpha_mode;
-end
-
-end
 
 function [d_grid, i_grid] = gridded_distance(d, dx)
 % Snap values in array d to a grid d_grid with step size dx.
