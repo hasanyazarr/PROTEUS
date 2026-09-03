@@ -15,11 +15,17 @@ function stats = validate_tile_placement(TileCfg, vtuStruct, Geometry)
 % Elevation never sweeps -- the rotation is about that axis -- so its extent is
 % the vessel's own either way.
 %
+% Only cells that can actually host a bubble are considered. The crops zero a
+% cell's seeding weight rather than deleting the row, so reading every row
+% would reject a slab-cropped run on elevation the seeding can no longer reach.
+%
 % INPUT:
 %  - TileCfg   : struct with .Enabled, .RandomizeRotation and .Transforms
 %                (as built by build_tile_transforms; .Offset is in the vessel
 %                frame, so T_image = Geometry.Rotation * Offset).
-%  - vtuStruct : struct with .points (Ncells x 3, m, canonical vessel frame).
+%  - vtuStruct : struct with .points (Ncells x 3, m, canonical vessel frame)
+%                and optionally .density (Ncells x 1); when present, only cells
+%                with a nonzero weight are checked.
 %  - Geometry  : struct with .Rotation, .BoundingBox.Center, .Center and
 %                .Domain (.Xmin/.Xmax depth, .Ymin/.Ymax lateral,
 %                .Zmin/.Zmax elevation, m, image frame).
@@ -32,7 +38,7 @@ function stats = validate_tile_placement(TileCfg, vtuStruct, Geometry)
 % overhangs, naming the tile, the axis and the overhang in mm.
 
 stats = struct('NumTiles', 0, 'MaxOverhang', -Inf, 'WorstTile', 0, ...
-    'WorstAxis', '');
+    'WorstAxis', '', 'SeedableCells', 0);
 
 if ~TileCfg.Enabled
     return
@@ -43,8 +49,13 @@ bb = Geometry.BoundingBox.Center(:);
 c  = Geometry.Center(:);
 D  = Geometry.Domain;
 
-img = (R * (vtuStruct.points.' - bb) + c).';   % Ncells x 3, [depth width elev]
-rel = img - c.';                               % about the rotation centre
+points = vtuStruct.points;
+if isfield(vtuStruct, 'density')
+    points = points(vtuStruct.density > 0, :);
+end
+
+img = (R * (points.' - bb) + c).';   % Nseedable x 3, [depth width elev]
+rel = img - c.';                     % about the rotation centre
 
 if TileCfg.RandomizeRotation
     % Worst case over all theta: the swept disc.
@@ -64,6 +75,7 @@ axisNames = {'depth', 'lateral', 'elevation'};
 
 transforms = TileCfg.Transforms;
 stats.NumTiles = numel(transforms);
+stats.SeedableCells = size(points, 1);
 
 for k = 1:numel(transforms)
     T = (R * transforms(k).Offset(:)).';        % vessel-frame offset -> image

@@ -75,4 +75,24 @@ catch err
 end
 assert(threw);
 
+%% Only cells that can actually host a bubble count. crop_vessel_to_slab zeroes
+%% the seeding weight of out-of-plane cells rather than deleting them, so a
+%% validator that reads every row would reject a slab-cropped run on elevation
+%% the seeding can no longer reach.
+seeded = vtu;
+seeded.density = [0; 0; 1];                 % only the cell at elevation 0
+cfg = base; cfg.Transforms = tile([0; 0; 0.003], 0);
+stats = validate_tile_placement(cfg, seeded, Geom);
+assert(stats.MaxOverhang <= 0);
+
+%% Without the weights the same tile is still refused -- the check has not
+%% simply been loosened.
+threw = false;
+try
+    validate_tile_placement(cfg, vtu, Geom);
+catch err
+    threw = strcmp(err.identifier, 'generate_streamlines:TilePlacementOutsideDomain');
+end
+assert(threw);
+
 disp('test_validate_tile_placement: all assertions passed');
