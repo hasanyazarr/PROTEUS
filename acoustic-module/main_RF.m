@@ -210,7 +210,14 @@ if SimulationParameters.HybridSimulation
     % 449.50 s one way, so the split wins from three batches on and loses
     % 449.50 s per pulse at a single batch - which is the production setting.
     % So record both sensor sets in one run whenever there is one batch.
-    combine_transmit_sensors = num_batches == 1;
+    %
+    % Except that the combined run records the microbubble mask over the
+    % round trip rather than the one-way window, which doubles the largest
+    % array in the run. With tiling that mask is 54x the transducer's, and
+    % the doubling is the difference between a transmit that fits the disk
+    % and one that does not, so the choice is a setting.
+    combine_transmit_sensors = num_batches == 1 && ...
+        run_param.CombineTransmitSensors;
 
     n_transducer_time = floor(run_param.tr(3) / kgrid.dt) + 1;
     n_mb_time = floor(run_param.tr(1) / kgrid.dt) + 1;
@@ -252,7 +259,8 @@ if SimulationParameters.HybridSimulation
         AcquisitionBatch.EndFrame = batch_end;
         [sensor_MB_batch, MB_idx_all, max_mb_batch, bubble_counts] = ...
             define_sensor_MB_all(Grid, groundtruthfolder, AcquisitionBatch, ...
-            length(sequence), Geometry);
+            length(sequence), Geometry, ...
+            run_param.MicrobubbleDeltaTruncation);
         param.max_mb = max(param.max_mb, max_mb_batch);
         if batch_idx == 1
             validate_evaluation_capture_yield_if_requested(...
@@ -263,7 +271,28 @@ if SimulationParameters.HybridSimulation
             warning('Microbubbles on transducer.')
         end
 
-        sensor_data_MB_1iter = cell(1,length(sequence));
+        mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
+
+        % One matrix per pulse taking the recorded transmit to the pressure
+        % each bubble senses. Built before the transmit, so a batch that
+        % cannot be recorded is refused before hours are spent on it, and so
+        % the frame loop no longer re-reads the ground truth, rebuilds a
+        % per-frame sensor mask, or re-intersects the batch mask against it.
+        t_proj = tic;
+        Projection = build_bubble_projection(Grid, groundtruthfolder, ...
+            AcquisitionBatch, length(sequence), Geometry, ...
+            mask_idx_MB_batch, run_param.MicrobubbleDeltaTruncation);
+        fprintf('[TIMING] Bubble projection (frames %d-%d): %.2f s\n', ...
+            batch_start, batch_end, toc(t_proj));
+
+        preflight_transmit_record(numel(mask_idx_MB_batch), ...
+            numel(mask_idx_trans), n_mb_time, n_transducer_time, ...
+            combine_transmit_sensors, Projection, run_param);
+
+        % What the frame loop reads: one row per bubble per frame, the
+        % pressure that bubble sensed. Megabytes, where the record it comes
+        % from is hundreds of gigabytes.
+        sensed_all = cell(1,length(sequence));
 
         if combine_transmit_sensors
             % One sensor over both masks, recorded for the round trip the
@@ -275,7 +304,6 @@ if SimulationParameters.HybridSimulation
                 sensor_MB_batch.mask | sensor_transducer.mask;
             sensor_combined.record = sensor_MB_batch.record;
             mask_idx_combined = find(sensor_combined.mask);
-            mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
             kgrid.Nt = n_transducer_time;
 
             for pulse_seq_idx = 1 : length(sequence)
@@ -294,24 +322,60 @@ if SimulationParameters.HybridSimulation
                 sensor_data_transducer_1iter{pulse_seq_idx} = ...
                     extract_sensor_subset(sensor_data_combined, ...
                     mask_idx_combined, mask_idx_trans, n_transducer_time);
-                sensor_data_MB_1iter{pulse_seq_idx} = ...
+                sensor_data_MB = ...
                     extract_sensor_subset(sensor_data_combined, ...
                     mask_idx_combined, mask_idx_MB_batch, n_mb_time);
                 clear sensor_data_combined
+
+                % Projected here rather than carried into the frame loop.
+                % The record is the largest array in the run and every frame
+                % uses a few thousand of its rows; the projection is what
+                % those rows are for.
+                t_pr = tic;
+                sensed_all{pulse_seq_idx} = project_transmit_to_bubbles( ...
+                    sensor_data_MB.p, Projection(pulse_seq_idx).W, ...
+                    n_mb_time, class(sensor_data_MB.p));
+                fprintf('[TIMING] Projection (pulse %d): %.2f s\n', ...
+                    pulse_seq_idx, toc(t_pr));
+                clear sensor_data_MB
             end
         else
-            mask_idx_MB_batch = find(logical(sensor_MB_batch.mask));
             kgrid.Nt = n_mb_time;
 
             for pulse_seq_idx = 1 : length(sequence)
+                % Never read whole. The microbubble record is the union of
+                % every bubble position in the batch, which tiling makes 54x
+                % the transducer mask -- 281 GB at v11's grid against 83 GB
+                % of host memory. run_simulation_to_disk leaves it in the
+                % binary's own output file and the projection streams it.
                 disp('Simulating MB-only transmit wave.')
                 t_tx = tic;
-                sensor_data_MB_1iter{pulse_seq_idx} = run_simulation(...
+                mb_record_file = run_simulation_to_disk(...
                     run_param, kgrid, medium, ...
                     source_transducer{pulse_seq_idx}, sensor_MB_batch);
                 fprintf('[TIMING] MB transmit wave (pulse %d, frames %d-%d): %.2f s\n', ...
                     pulse_seq_idx, batch_start, batch_end, toc(t_tx));
+
+                t_pr = tic;
+                cleanupRecord = onCleanup(@() delete_if_present(mb_record_file));
+                sensed_all{pulse_seq_idx} = project_transmit_to_bubbles( ...
+                    mb_record_file, Projection(pulse_seq_idx).W, ...
+                    n_mb_time, 'single');
+                clear cleanupRecord
+                fprintf('[TIMING] Projection (pulse %d): %.2f s\n', ...
+                    pulse_seq_idx, toc(t_pr));
             end
+        end
+
+        % The frame loop does not read the medium grids. The homogeneous
+        % propagation takes its four scalars from run_param.MediumAverage
+        % (PROTEUS a166452), so all that is carried through the frame loop
+        % is the struct itself -- ~10 GB at v11's grid, already on disk in
+        % medium.mat. Emptied rather than left, so a future read fails
+        % loudly instead of quietly using a stale grid.
+        if batch_idx == num_batches
+            clear medium
+            medium = struct();
         end
 
         for frame = batch_start : batch_end
@@ -322,46 +386,27 @@ if SimulationParameters.HybridSimulation
 
             for pulse_seq_idx = 1 : length(sequence)
 
-                % Reading this frame's bubbles and building its sensor.
+                % This frame's bubbles, read from the projection pass that
+                % already loaded and voxelised them.
                 t_load = tic;
-                MB = load_microbubbles(groundtruthfolder, frame, pulse_seq_idx, ...
-                    Geometry, Acquisition.NumberOfFrames);
-
-                % define the sensor of the current frame
-                [sensor_frame, sensor_weights_frame, MB, run_param.max_dist] = ...
-                    define_sensor_MB(Grid, MB);
-
-                mask_idx_frame = find(logical(sensor_frame.mask));
+                frame_in_batch = frame - batch_start + 1;
+                MB = Projection(pulse_seq_idx).MB{frame_in_batch};
+                run_param.max_dist = ...
+                    Projection(pulse_seq_idx).MaxDist(frame_in_batch);
                 run_log('stage', 'load', toc(t_load));
 
-                % Taking the batch's recorded transmit down to this frame's
-                % bubble positions. The batch sensor covers every frame in
-                % the batch, so this both selects rows and applies the
-                % per-bubble interpolation weights.
-                % Split because the two halves have different fixes. The
-                % selection re-intersects mask_idx_MB_batch -- constant for
-                % the whole batch -- against this frame's mask on every frame,
-                % so it is a hoist if it dominates. The weighting is a sparse
-                % product that has to go through double, since MATLAB has no
-                % single-precision sparse, so it is not. Measured together at
-                % 2.4 s of a 14.8 s frame, which is 16% with no way to tell
-                % which half.
+                % The pressure this frame's bubbles sensed, already computed.
+                % This used to select the frame's rows out of the batch
+                % record and apply the interpolation weights, once per frame:
+                % an intersect of the batch mask against the frame's, and a
+                % sparse product through double, measured together at 2.4 s
+                % of a 14.8 s frame. Both moved into the one product the
+                % transmit is streamed through.
                 t_sense = tic;
-                t_idx = tic;
-                sensor_data_MB = extract_sensor_subset(...
-                    sensor_data_MB_1iter{pulse_seq_idx}, ...
-                    mask_idx_MB_batch, mask_idx_frame, n_mb_time);
+                sensed_p = sensed_all{pulse_seq_idx}( ...
+                    Projection(pulse_seq_idx).RowFirst(frame_in_batch): ...
+                    Projection(pulse_seq_idx).RowLast(frame_in_batch), :);
                 sensor_data_trans = sensor_data_transducer_1iter{pulse_seq_idx};
-                sync_if_on_device(sensor_data_MB.p);
-                run_log('stage', 'idx', toc(t_idx));
-
-                % Pressure sensed by the microbubbles
-                t_weights = tic;
-                sensed_p = sensor_weights_frame*double(sensor_data_MB.p);
-                sensed_p = cast(full(sensed_p),class(sensor_data_MB.p));
-                sync_if_on_device(sensed_p);
-                run_log('stage', 'weights', toc(t_weights));
-
                 run_log('stage', 'sense', toc(t_sense));
 
                 stopAfterCapture = capture_sensed_pressure_if_requested(...
@@ -762,14 +807,14 @@ end
 end
 
 
-function sync_if_on_device(data)
-% Timing a stage whose result is still queued on the GPU measures how long it
-% took to submit the work, not to do it. Only pay for the barrier when the
-% data is actually on the device -- the k-Wave binaries hand back host arrays,
-% so on those paths this costs nothing.
+function delete_if_present(filename)
+% Remove a transmit record, whether the projection finished or threw.
+%
+% The file is hundreds of gigabytes and the disk it sits on is the reason
+% this path exists, so it must not survive an error on the way out.
 
-if isa(data, 'gpuArray')
-    wait(gpuDevice);
+if ~isempty(filename) && exist(filename, 'file')
+    delete(filename);
 end
 
 end

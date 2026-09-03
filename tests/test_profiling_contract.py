@@ -17,24 +17,23 @@ def read(relpath: str) -> str:
     return (ROOT / relpath).read_text()
 
 
-def test_sense_is_split_into_the_two_things_it_does():
-    """sense both selects the frame's rows out of the batch sensor and applies
-    the per-bubble interpolation weights. The row selection re-intersects a
-    batch-wide index on every frame; the weighting is a sparse product through
-    a double cast. One timer over both cannot say which to attack."""
+def test_sense_no_longer_does_the_two_things_it_was_split_for():
+    """The 2.4 s sense stage measured a row selection and a sparse product,
+    and idx/weights existed to say which half was expensive. The answer turned
+    out to be neither: both are done once for the whole batch now, inside the
+    product the recorded transmit is streamed through, so sense is a row slice
+    out of an array that is already computed. Timers over work that no longer
+    happens would report zero and mislead the next reader."""
     src = read("acoustic-module/main_RF.m")
+    log = read("acoustic-module/run_log.m")
 
-    assert "run_log('stage', 'idx'," in src
-    assert "run_log('stage', 'weights'," in src
-
-
-def test_the_sense_children_are_registered_as_nested():
-    """Otherwise they print as top-level stages and the frame line stops
-    adding up."""
-    src = read("acoustic-module/run_log.m")
-
-    assert "'idx', 'sense'" in src
-    assert "'weights', 'sense'" in src
+    assert "run_log('stage', 'idx'," not in src
+    assert "run_log('stage', 'weights'," not in src
+    assert "'idx', 'sense'" not in log
+    assert "'weights', 'sense'" not in log
+    # sense still exists and still brackets what the frame does to get there.
+    assert "run_log('stage', 'sense', toc(t_sense));" in src
+    assert "sensed_p = sensed_all{pulse_seq_idx}( ..." in src
 
 
 def test_propagation_profiling_is_reachable_from_the_driver():

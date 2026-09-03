@@ -29,7 +29,11 @@ STATE_KEY = 'PROTEUS_run_log';
 ORDER = {'load', 'sense', 'MB', 'prop', 'RF', 'save'};
 
 % Stages that measure part of another stage, as {child, parent}.
-NESTED = {'ODE', 'MB'; 'idx', 'sense'; 'weights', 'sense'; ...
+% idx and weights lived here while sense selected a frame's rows out of the
+% cached transmit and multiplied them by that frame's weights. Both moved
+% into the one product the transmit is streamed through, so sense is now a
+% row slice and has nothing left to break down.
+NESTED = {'ODE', 'MB'; ...
     'dist', 'prop'; 'field', 'prop'; 'accum', 'prop'};
 
 % A state left behind by an earlier version of this file would be missing

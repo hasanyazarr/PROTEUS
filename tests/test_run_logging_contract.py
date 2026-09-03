@@ -104,7 +104,7 @@ def test_frame_line_reports_progress_stages_and_eta():
     # as one literal, so adding a child stage does not break the test for a
     # reason that has nothing to do with what it is checking.
     assert "NESTED = {" in src
-    for child, parent in [("ODE", "MB"), ("idx", "sense"), ("weights", "sense"),
+    for child, parent in [("ODE", "MB"),
                           ("dist", "prop"), ("field", "prop"),
                           ("accum", "prop")]:
         assert "'{}', '{}'".format(child, parent) in src, \
@@ -122,9 +122,14 @@ def test_every_part_of_the_frame_is_accounted_for():
     against a 14.8 s frame, leaving 4.5 s - 30% of every frame - under no
     stage at all. That is more than the whole bubble solver, and nothing
     could be aimed at it while it was invisible. The work between the timed
-    stages is loading the frame's bubbles and building its sensor, taking
-    the batch's recorded pressure down to this frame's points, and writing
-    the result.
+    stages is reading the frame's bubbles, taking the batch's recorded
+    pressure down to this frame's points, and writing the result.
+
+    load and sense both shrank when the transmit stopped being cached: the
+    bubbles are read once for the whole batch by build_bubble_projection and
+    the pressure is projected in one product, so what these two now bracket
+    is a cell read and a row slice. They stay timed because a frame line that
+    stops adding up is how the missing 30% went unnoticed for a month.
     """
     src = read("acoustic-module/main_RF.m")
 
@@ -132,13 +137,11 @@ def test_every_part_of_the_frame_is_accounted_for():
     assert "run_log('stage', 'sense', toc(t_sense));" in src
     assert "run_log('stage', 'save', toc(t_save));" in src
     # The stages have to bracket the real work, not just exist.
-    for timer, call in (("t_load", "load_microbubbles("),
-                        ("t_sense", "extract_sensor_subset("),
+    for timer, call in (("t_load", "Projection(pulse_seq_idx).MB{frame_in_batch}"),
+                        ("t_sense", "sensed_all{pulse_seq_idx}( ..."),
                         ("t_save", "save([savedir filesep file_name]")):
         opened = src.index(timer + " = tic;")
         closed = src.index("toc(" + timer + ")")
-        # Search from the timer: extract_sensor_subset is also called once per
-        # batch, to split the combined transmit run into its two sensor sets.
         assert opened < src.index(call, opened) < closed, timer
 
 

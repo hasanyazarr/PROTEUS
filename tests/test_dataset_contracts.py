@@ -226,6 +226,100 @@ def test_define_sensor_MB_prunes_every_per_bubble_field():
     assert "MB.velocities(idx_exclude,:) = [];" not in src
 
 
+def test_microbubble_transmit_is_streamed_not_cached():
+    """The record the bubbles read is never held whole.
+
+    It is the union of every bubble position in the batch. Without tiling that
+    union deduplicates hard; with 200 tiles it does not, and at v11's grid it
+    is 1.08e7 points against a 201795-point transducer mask -- 281 GB over the
+    one-way window, against 83 GB of host memory. run_simulation_to_disk
+    leaves it in the binary's output file and project_transmit_to_bubbles
+    blocks over time, so the peak is one block.
+    """
+    run_to_disk = read("acoustic-module/run_simulation_to_disk.m")
+    project = read("acoustic-module/project_transmit_to_bubbles.m")
+
+    # The point of the function: return the file, do not read the record.
+    # Checked against code only -- the comments explain the h5read this
+    # exists to avoid, and would otherwise match.
+    code = "\n".join(line for line in run_to_disk.splitlines()
+                     if not line.lstrip().startswith("%"))
+    assert "function output_filename = run_simulation_to_disk(" in run_to_disk
+    assert "'SaveToDisk', input_filename" in run_to_disk
+    assert "h5read" not in code
+    # A failed binary must say so here. The 2026-09-03 run reported a full
+    # disk as "object 'Nx' doesn't exist" from h5read, three frames of stack
+    # away from what went wrong.
+    assert "run_simulation_to_disk:BinaryFailed" in run_to_disk
+    assert "run_simulation_to_disk:NoOutput" in run_to_disk
+    # The two paths must set up the same simulation.
+    assert "kwave_input_args(run_param)" in run_to_disk
+    assert "kwave_input_args(run_param)" in read("acoustic-module/run_simulation.m")
+
+    # Blocked over time, and the layout that makes a time block contiguous is
+    # checked rather than assumed.
+    assert "block_cols = max(1, floor(budget_bytes / (n_rows * 8)));" in project
+    assert "project_transmit_to_bubbles:UnexpectedLayout" in project
+    assert "h5info(record, '/p')" in project
+
+
+def test_the_bubble_projection_is_built_once_per_batch():
+    """One matrix per pulse, not one intersect and one product per frame.
+
+    Each frame's weights, relocated onto the batch mask's columns and stacked,
+    give a matrix whose product with the record is what the frame loop used to
+    compute frame by frame -- the same nonzeros in the same column order, so
+    the same numbers. The bubbles come along because this pass has already
+    loaded and voxelised them.
+    """
+    src = read("acoustic-module/build_bubble_projection.m")
+
+    assert "cols = locate_in_sorted(mask_idx_batch, mask_idx_frame);" in src
+    assert "Projection(pulse_seq_idx).RowFirst = row_first;" in src
+    assert "Projection(pulse_seq_idx).MB       = MB_all;" in src
+    assert "Projection(pulse_seq_idx).MaxDist  = max_dist;" in src
+    # Sized explicitly: one frame does not reach the last union column.
+    assert "next_row - 1, n_union);" in src
+
+
+def test_the_delta_truncation_radius_is_a_setting():
+    """th sets the (2*th+1)^3 stencil each bubble occupies, and the union of
+    those stencils is what sizes the recorded transmit. It was fixed at 4
+    inside update_sensor, where no config could reach it. The transducer keeps
+    the default whatever the microbubbles are set to.
+    """
+    setup = read("acoustic-module/sim_setup.m")
+    sensor = read("acoustic-module/update_sensor.m")
+    main = read("acoustic-module/main_RF.m")
+    transducer = read("acoustic-module/define_sensor_transducer.m")
+
+    assert "run_param.MicrobubbleDeltaTruncation = 4;" in setup
+    assert "sim_setup:InvalidDeltaTruncation" in setup
+    assert "if nargin < 6 || isempty(th)" in sensor
+    assert "th = 4;" in sensor
+    assert "get_truncated_grid(...\n    point, point_idx, Grid, th)" in sensor
+    assert "run_param.MicrobubbleDeltaTruncation);" in main
+    # The transducer's own sensor is built without it.
+    assert "MicrobubbleDeltaTruncation" not in transducer
+
+
+def test_the_transmit_record_is_sized_before_it_is_run():
+    """Everything needed to refuse a 550 GB write is known before the first
+    transmit; the 2026-09-03 run found out 36 minutes in, at 25% of pulse one.
+    """
+    src = read("acoustic-module/preflight_transmit_record.m")
+    main = read("acoustic-module/main_RF.m")
+
+    assert "preflight_transmit_record:RecordTooLarge" in src
+    assert "getUsableSpace()" in src
+    for knob in ("MicrobubbleDeltaTruncation", "CombineTransmitSensors",
+                 "TransmitBatchSize", "Tiling.NumTiles"):
+        assert knob in src, knob
+    # Called before the transmit, not after it.
+    assert (main.index("preflight_transmit_record(")
+            < main.index("Simulating combined transducer and MB transmit wave."))
+
+
 def test_file_hash_helper_exists():
     src = read("scripts/private/file_hash.m")
 
@@ -269,16 +363,28 @@ def test_define_sensor_mb_all_uses_current_acquisition_window():
 
 
 def test_main_rf_splits_transducer_and_mb_transmit_batches():
+    """The transducer record is cached across the batch; the MB record is not.
+
+    sensor_data_MB_1iter used to hold the microbubble transmit for every pulse
+    at once. That record is the union of every bubble position in the batch,
+    which tiling makes 54x the transducer mask -- 281 GB at v11's grid against
+    83 GB of host memory -- so it is streamed from the binary's own output
+    file and projected onto the bubbles instead of being held.
+    """
     src = read("acoustic-module/main_RF.m")
 
     assert "get_transmit_batch_size(SimulationParameters, Acquisition)" in src
     assert "make_frame_batches(Acquisition.StartFrame, Acquisition.EndFrame" in src
     assert "sensor_data_transducer_1iter" in src
-    assert "sensor_data_MB_1iter" in src
+    assert "sensor_data_MB_1iter" not in src
+    assert "mb_record_file = run_simulation_to_disk(" in src
     assert "Simulating transducer-only transmit wave." in src
     assert "Simulating MB-only transmit wave." in src
     assert "kgrid.Nt = floor(run_param.tr(1) / kgrid.dt) + 1;" in src
     assert "extract_sensor_subset" in src
+    # The record is hundreds of gigabytes on the disk this path exists for,
+    # so it must not survive a projection that throws.
+    assert "onCleanup(@() delete_if_present(mb_record_file))" in src
 
 
 def test_main_rf_preserves_global_frame_numbering_after_internal_batching():
@@ -393,10 +499,19 @@ def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
     combined n*817, so the split only pays from three batches on. With a
     single batch - the production setting, TransmitBatchSize = NumberOfFrames
     - it is 450 s per pulse spent for nothing.
+
+    That trade is no longer free, so it is no longer automatic. The combined
+    run records the microbubble mask over the round trip rather than the
+    one-way window, and with tiling that mask is 54x the transducer's: the
+    doubling is the difference between a transmit that fits the disk and one
+    that does not. Still the default, now overridable.
     """
     src = read("acoustic-module/main_RF.m")
 
-    assert "combine_transmit_sensors = num_batches == 1;" in src
+    assert ("combine_transmit_sensors = num_batches == 1 && ...\n"
+            "        run_param.CombineTransmitSensors;") in src
+    setup = read("acoustic-module/sim_setup.m")
+    assert "run_param.CombineTransmitSensors = true;" in setup
     assert "Simulating combined transducer and MB transmit wave." in src
     # The combined sensor is the union of the two masks, recorded for the
     # round trip the transducer needs. OR, not sum: both masks are logical
@@ -406,9 +521,10 @@ def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
     # Both sensor sets come out of that one run.
     assert "sensor_data_transducer_1iter{pulse_seq_idx} = ..." in src
     assert "mask_idx_combined, mask_idx_trans, n_transducer_time);" in src
-    # The MB rows are kept only for the one-way window, so the block held
-    # through the frame loop is the size the split path held.
+    # The MB rows are kept only for the one-way window, and are projected
+    # onto the bubbles here rather than carried into the frame loop.
     assert "mask_idx_combined, mask_idx_MB_batch, n_mb_time);" in src
+    assert "sensed_all{pulse_seq_idx} = project_transmit_to_bubbles( ..." in src
     # The split path stays for the multi-batch case.
     assert "Simulating transducer-only transmit wave." in src
     assert "Simulating MB-only transmit wave." in src

@@ -1,5 +1,5 @@
 function [sensor, sensor_weights, MB, max_dist] = ...
-    define_sensor_MB(Grid, MB)
+    define_sensor_MB(Grid, MB, th)
 % =========================================================================
 % DEFINE THE SENSOR: MBs and transducer record pressure
 % input:    kgrid
@@ -15,7 +15,14 @@ function [sensor, sensor_weights, MB, max_dist] = ...
 %           as MBs
 % 
 %
+% th: truncation radius of the band-limited delta function, optional,
+%     default 4. See update_sensor.
+%
 % =========================================================================
+
+if nargin < 3
+    th = [];
+end
 
 % Logical, not double -- see define_sensor_MB_all. update_sensor assigns
 % 1/true into it and every reader takes find() or logical() of it.
@@ -56,7 +63,7 @@ end
 % Put sensors at the microbubbles
 mask_only = false;
 [sensor, sensor_weights] = update_sensor(sensor, MB.points, MB.idx, ...
-    Grid, mask_only);
+    Grid, mask_only, th);
 
 sensor.record={'p'};  
 

@@ -1,5 +1,5 @@
 function [sensor, MB_idx_all, max_mb, bubble_counts] = define_sensor_MB_all(...
-    Grid, folder, Acquisition, N_sequence, Geometry)
+    Grid, folder, Acquisition, N_sequence, Geometry, th)
 %DEFINE_SENSOR_MB_ALL loops through all the frames and sequence pulses that
 %need to be simulated and adds all corresponding microbubbles to the sensor
 %struct for the first iteration.
@@ -9,12 +9,19 @@ function [sensor, MB_idx_all, max_mb, bubble_counts] = define_sensor_MB_all(...
 % Acquisition: Acquisition properties
 % N_sequence:  Number of pulses in each acquisition sequence
 % Geometry:    Geometry properties
+% th:          truncation radius of the band-limited delta function,
+%              optional, default 4. It sets how many grid points each
+%              bubble occupies, so it is what sizes this union.
 %
 % Nathan Blanken, Alina Kuliesh, Guillaume Lajoinie, 2023
 
 % Build the sensor mask over the UNION of bubble positions in the current
 % Acquisition.StartFrame..Acquisition.EndFrame window. The total
 % NumberOfFrames is still used for ground-truth filename padding.
+if nargin < 6
+    th = [];
+end
+
 Nframes     = Acquisition.NumberOfFrames; % Total number of ground truth frames
 frame_start = Acquisition.StartFrame;
 frame_end   = Acquisition.EndFrame;
@@ -45,7 +52,7 @@ for frame = frame_start : frame_end
         % Put sensor at the microbubbles
         mask_only = true;
         [sensor,~] = update_sensor(sensor, MB.points, MB_idx, ...
-            Grid, mask_only);
+            Grid, mask_only, th);
     
     end
 
