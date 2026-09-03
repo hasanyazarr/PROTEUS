@@ -205,6 +205,27 @@ def test_process_run_clutter_filter_offers_modes_and_validates_them():
     assert "ClutterState.CutoffHz = fc;" in src
 
 
+def test_define_sensor_MB_prunes_every_per_bubble_field():
+    """A bubble that falls off the grid must leave every field, not two of them.
+
+    Only radii and velocities were pruned until 2026-09-03, so TileID and
+    RawVelocity kept their pre-exclusion length and, from the first dropped
+    bubble on, described a different bubble than Points did. main_RF saves this
+    struct into the RF frame, so the mislabelling is in shipped data: 10 of 40
+    pulses checked in run_20260827_120645 and 5 of 120 in run_20260831_142721.
+    Pruning by row count rather than by field name is what stops the next field
+    added to load_microbubbles from being forgotten.
+    """
+    src = read("acoustic-module/define_sensor_MB.m")
+
+    assert "MB = exclude_bubbles(MB, idx_exclude, n_bubbles);" in src
+    assert "function MB = exclude_bubbles(MB, idx_exclude, n_bubbles)" in src
+    assert "if size(value, 1) == n_bubbles" in src
+    # The old named-field pruning must be gone, not merely supplemented.
+    assert "MB.radii     (idx_exclude,:) = [];" not in src
+    assert "MB.velocities(idx_exclude,:) = [];" not in src
+
+
 def test_file_hash_helper_exists():
     src = read("scripts/private/file_hash.m")
 
