@@ -28,6 +28,15 @@ load(settingsfile,'Acquisition','Geometry','Medium',...
 % simulation settings
 run_param = sim_setup(SimulationParameters);
 
+% A transmit path the chosen solver cannot run is refused here, before the
+% medium is built and hours before the transmit would have found out. Only the
+% batch count decides it, and that is known from the settings alone; the
+% batches themselves are made again where they are used.
+validate_transmit_path_supported(run_param, ...
+    SimulationParameters.HybridSimulation, ...
+    size(make_frame_batches(Acquisition.StartFrame, Acquisition.EndFrame, ...
+        get_transmit_batch_size(SimulationParameters, Acquisition)), 1));
+
 % Microbubble parallel processing properties:
 Microbubble.BatchSize = run_param.MicrobubblesBatchSize;
 Microbubble.UseParfor = run_param.MicrobubblesUseParfor;
@@ -216,7 +225,10 @@ if SimulationParameters.HybridSimulation
     % array in the run. With tiling that mask is 54x the transducer's, and
     % the doubling is the difference between a transmit that fits the disk
     % and one that does not, so the choice is a setting.
-    combine_transmit_sensors = num_batches == 1 && ...
+    % What the settings ask for. What is affordable is decided by
+    % preflight_transmit_record inside the batch loop, once the union mask has
+    % made the sizes known -- see the fallback there.
+    combine_requested = num_batches == 1 && ...
         run_param.CombineTransmitSensors;
 
     n_transducer_time = floor(run_param.tr(3) / kgrid.dt) + 1;
@@ -234,18 +246,13 @@ if SimulationParameters.HybridSimulation
     end
 
     sensor_data_transducer_1iter = cell(1,length(sequence));
+    transducer_transmit_done = false;
 
-    if ~combine_transmit_sensors
-        kgrid.Nt = n_transducer_time;
-        for pulse_seq_idx = 1 : length(sequence)
-            disp('Simulating transducer-only transmit wave.')
-            t_tx = tic;
-            sensor_data_transducer_1iter{pulse_seq_idx} = run_simulation(...
-                run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
-                sensor_transducer);
-            fprintf('[TIMING] Transducer transmit wave (pulse %d): %.2f s\n', ...
-                pulse_seq_idx, toc(t_tx));
-        end
+    if ~combine_requested
+        sensor_data_transducer_1iter = run_transducer_transmit(...
+            run_param, kgrid, medium, source_transducer, sensor_transducer, ...
+            n_transducer_time, length(sequence));
+        transducer_transmit_done = true;
     end
 
     for batch_idx = 1:num_batches
@@ -277,9 +284,22 @@ if SimulationParameters.HybridSimulation
         % union mask exists, and the projection below walks every frame of
         % the batch -- ~25 min at v11's scale -- so a batch that cannot be
         % recorded must not pay for it before being refused.
-        preflight_transmit_record(numel(mask_idx_MB_batch), ...
-            numel(mask_idx_trans), n_mb_time, n_transducer_time, ...
-            combine_transmit_sensors, bubble_counts, run_param);
+        % The path is chosen here too, not by the setting alone: the combined
+        % record is read whole into host memory and the split one is streamed,
+        % so which of them fits is a fact about this batch's union mask.
+        combine_transmit_sensors = preflight_transmit_record( ...
+            numel(mask_idx_MB_batch), numel(mask_idx_trans), n_mb_time, ...
+            n_transducer_time, combine_requested, bubble_counts, run_param);
+
+        % A refused combined path leaves the transducer transmit it was going
+        % to carry unrun. Nothing earlier could have known: the sizes that
+        % refuse it are the union mask's, and the union mask is built here.
+        if ~combine_transmit_sensors && ~transducer_transmit_done
+            sensor_data_transducer_1iter = run_transducer_transmit(...
+                run_param, kgrid, medium, source_transducer, ...
+                sensor_transducer, n_transducer_time, length(sequence));
+            transducer_transmit_done = true;
+        end
 
         % One matrix per pulse taking the recorded transmit to the pressure
         % each bubble senses. Built before the transmit, so the frame loop
@@ -823,10 +843,25 @@ end
 end
 
 
-function sensor_subset = extract_sensor_subset(...
-    sensor_data, source_mask_idx, target_mask_idx, n_time_points)
-[~, sensor_data_idx, ~] = intersect(source_mask_idx, target_mask_idx);
-sensor_subset.p = sensor_data.p(sensor_data_idx, 1:n_time_points);
+function sensor_data_transducer_1iter = run_transducer_transmit(...
+    run_param, kgrid, medium, source_transducer, sensor_transducer, ...
+    n_transducer_time, n_pulses)
+% The transducer's own transmit, recorded over the round trip it needs.
+%
+% Called before the batch loop when the split path was asked for, and inside
+% it when the preflight refuses the combined path that would have carried
+% this recording -- which it can only do once the union mask exists.
+kgrid.Nt = n_transducer_time;
+sensor_data_transducer_1iter = cell(1, n_pulses);
+for pulse_seq_idx = 1 : n_pulses
+    disp('Simulating transducer-only transmit wave.')
+    t_tx = tic;
+    sensor_data_transducer_1iter{pulse_seq_idx} = run_simulation(...
+        run_param, kgrid, medium, source_transducer{pulse_seq_idx}, ...
+        sensor_transducer);
+    fprintf('[TIMING] Transducer transmit wave (pulse %d): %.2f s\n', ...
+        pulse_seq_idx, toc(t_tx));
+end
 end
 
 

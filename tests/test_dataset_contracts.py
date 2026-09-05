@@ -315,13 +315,72 @@ def test_the_transmit_record_is_sized_before_it_is_run():
     for knob in ("MicrobubbleDeltaTruncation", "CombineTransmitSensors",
                  "TransmitBatchSize", "Tiling.NumTiles"):
         assert knob in src, knob
+
+    # Disk alone left a hole: the combined path reads its record into host
+    # memory and then takes two subsets off it before releasing it, so a
+    # record between the host's memory and the disk's free space passed and
+    # died hours later out of memory. Both budgets are sized, and both can
+    # be given rather than measured so a test can say what "free" means.
+    assert "combined_peak" in src and "split_peak" in src
+    assert "HostMemoryBytes" in src
+    assert "/proc/meminfo" in src
+    # The cgroup ceiling is the one that binds in a container; /proc there
+    # reports the whole machine.
+    assert "/sys/fs/cgroup/memory.max" in src
+    assert "/sys/fs/cgroup/memory.current" in src
     # Sized from the bubble counts, so it runs between the union mask and
     # build_bubble_projection -- which walks every frame of the batch, ~25 min
     # at v11's scale -- rather than after it.
-    assert "combined, bubble_counts, run_param)" in src
+    assert "combined_requested, bubble_counts, run_param)" in src
     assert (main.index("preflight_transmit_record(")
             < main.index("Projection = build_bubble_projection(")
             < main.index("Simulating combined transducer and MB transmit wave."))
+
+
+def test_the_two_transmit_paths_agree_on_which_rows_they_produce():
+    """The preflight moves a run between the combined and split paths on its
+    own now, so "the two agree" is a claim the code rests on rather than one a
+    person makes per run. The half of it that is ours -- which rows come out
+    of a combined record and in what order -- is asserted in
+    tests/matlab/test_combined_split_extraction_equivalence.m, which needs the
+    function to be reachable, hence its own file.
+    """
+    src = read("acoustic-module/extract_sensor_subset.m")
+    main = read("acoustic-module/main_RF.m")
+
+    assert "function sensor_subset = extract_sensor_subset(" in src
+    # intersect would otherwise return the rows it found and say nothing.
+    assert "extract_sensor_subset:TargetNotRecorded" in src
+    # And it is no longer a local function of main_RF.
+    assert "function sensor_subset = extract_sensor_subset(" not in main
+    assert "extract_sensor_subset(sensor_data_combined, ..." in main
+
+
+def test_a_transmit_the_solver_cannot_run_is_refused_before_the_medium():
+    """The split path streams its record out of the binary's own HDF5 output,
+    so '3D' and 'MATLAB' -- which sim_setup gives no BINARY_PATH -- can only
+    run a single-batch combined transmit. That used to surface at the transmit,
+    which is reached after the medium, the union mask and the projection pass.
+    """
+    src = read("acoustic-module/validate_transmit_path_supported.m")
+    main = read("acoustic-module/main_RF.m")
+
+    assert "main_RF:TransmitPathUnsupported" in src
+    assert "BINARY_PATH" in src
+    for knob in ("Solver", "TransmitBatchSize", "CombineTransmitSensors"):
+        assert knob in src, knob
+
+    # Before the medium is built, not at the transmit that would have found out.
+    assert "validate_transmit_path_supported(" in main
+    assert (main.index("validate_transmit_path_supported(")
+            < main.index("define_medium(Grid, Medium, Geometry")
+            < main.index("preflight_transmit_record("))
+
+    # And the preflight must not downgrade into a path that needs a binary
+    # there is none of.
+    pre = read("acoustic-module/preflight_transmit_record.m")
+    assert "streaming" in pre
+    assert "isfield(run_param, 'BINARY_PATH')" in pre
 
 
 def test_file_hash_helper_exists():
@@ -509,11 +568,24 @@ def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
     one-way window, and with tiling that mask is 54x the transducer's: the
     doubling is the difference between a transmit that fits the disk and one
     that does not. Still the default, now overridable.
+
+    And no longer decided by the setting alone. The setting says what to ask
+    for; preflight_transmit_record answers with what the disk and the host's
+    memory can hold, and the split path -- never larger on either axis -- is
+    what a refusal falls back to.
     """
     src = read("acoustic-module/main_RF.m")
 
-    assert ("combine_transmit_sensors = num_batches == 1 && ...\n"
+    assert ("combine_requested = num_batches == 1 && ...\n"
             "        run_param.CombineTransmitSensors;") in src
+    assert "combine_transmit_sensors = preflight_transmit_record(" in src
+    # The transducer transmit the combined path was going to carry has not
+    # been run when the fallback happens, so the fallback has to run it --
+    # inside the batch loop, where the sizes that refused it became known.
+    assert "transducer_transmit_done" in src
+    assert src.count("run_transducer_transmit(") == 3   # def + both call sites
+    assert (src.index("combine_transmit_sensors = preflight_transmit_record(")
+            < src.index("if ~combine_transmit_sensors && ~transducer_transmit_done"))
     setup = read("acoustic-module/sim_setup.m")
     assert "run_param.CombineTransmitSensors = true;" in setup
     assert "Simulating combined transducer and MB transmit wave." in src
