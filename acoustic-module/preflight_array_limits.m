@@ -57,6 +57,50 @@ record_GB = N_sensor * M * bytesPerSample / 2^30;
 fprintf(['  host: transmit cache %d x %.1f GB, plus about 2 x %.1f GB ' ...
     'per frame\n'], N_pulses, record_GB, record_GB);
 
+% Device residency, which the element cap above says nothing about.
+%
+% Every partition in this path allocates all of its blocks up front, so the
+% element cap bounds one array while the resident total stays the whole
+% record. The propagation accumulator is the largest of them: it is held in
+% full across the source loop, with a chunk-sized temporary rebuilt on top
+% of it once per source.
+%
+% Reported and warned about, not enforced. Unlike the element cap this is
+% an estimate -- it cannot see k-Wave's own allocations, MATLAB's allocator
+% cache, or what another process on the device holds -- so a hard error
+% here would refuse configurations that do run.
+if useGPU
+    [p_first, p_last] = prop_sensor_chunks(N_sensor, M, dataType, ...
+        useGPU, run_param);
+    propChunkRows = max(p_last - p_first + 1);
+    residentGiB   = N_sensor * M * bytesPerSample / 2^30;
+    transientGiB  = 2 * propChunkRows * M * bytesPerSample / 2^30;
+    peakGiB       = residentGiB + transientGiB;
+    fprintf(['  device: propagation accumulator %.2f GiB resident in %d ' ...
+        'chunk(s), about %.2f GiB transient, peak about %.2f GiB\n'], ...
+        residentGiB, numel(p_first), transientGiB, peakGiB);
+
+    availableGiB = [];
+    try
+        dev = gpuDevice;                 % no argument: does not reset
+        availableGiB = double(dev.AvailableMemory) / 2^30;
+    catch
+        % No device visible from here; the run will say so on its own.
+    end
+    if ~isempty(availableGiB)
+        fprintf('  device: %.2f GiB free of %.2f GiB\n', ...
+            availableGiB, double(dev.TotalMemory) / 2^30);
+        if peakGiB > availableGiB
+            run_log('banner', 'vrambudget', ...
+                ['Receive propagation needs about %.2f GiB on the ' ...
+                 'device and %.2f GiB is free. The chunking bounds each ' ...
+                 'array, not the total, so this is likely to fail on ' ...
+                 'allocation rather than on the element limit.'], ...
+                peakGiB, availableGiB);
+        end
+    end
+end
+
 if useGPU && (worstBlock > limit || worstChunk > limit)
     error('PROTEUS:preflight:arrayOverLimit', ...
         ['The receive path cannot be held on the device even blocked: ' ...

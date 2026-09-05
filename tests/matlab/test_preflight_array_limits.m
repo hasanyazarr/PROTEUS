@@ -26,7 +26,24 @@ Transducer.integration_points = zeros(N_el, N_int, 3);
 Transducer.integration_receive_delays = 1e-8 * ones(N_el, N_int);
 
 assert(N_el*N_int*M > LIMIT, 'v10 must be over the limit whole');
-preflight_array_limits(Transducer, N_sensor, M, 3, Grid, run_param);
+out = evalc('preflight_array_limits(Transducer, N_sensor, M, 3, Grid, run_param);');
+
+% The element cap says nothing about how much of the device is held at once,
+% so the banner has to report the resident total as well. v10's accumulator
+% is 201795 x 12444 single = 9.36 GiB however finely it is chunked.
+assert(contains(out, 'propagation accumulator'), ...
+    'the preflight does not report device residency');
+residentGiB = N_sensor * M * 4 / 2^30;
+assert(contains(out, sprintf('%.2f GiB resident', residentGiB)), ...
+    sprintf('expected %.2f GiB resident in the banner, got:\n%s', ...
+            residentGiB, out));
+
+% And the chunking must have bounded the transient well below it.
+[pf, pl] = prop_sensor_chunks(N_sensor, M, 'single', true, run_param);
+assert(numel(pf) > 1, 'v10 must need more than one propagation chunk');
+assert(max(pl - pf + 1) * M * 4 <= 2^30, ...
+    'a propagation chunk is over the 1 GiB budget');
+assert(pl(end) == N_sensor && pf(1) == 1, 'chunks do not tile the axis');
 
 % And on the host retry, where there is no device limit to trip at all.
 run_param_cpu = run_param;

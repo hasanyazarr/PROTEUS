@@ -29,16 +29,43 @@ def source() -> str:
 
 def test_the_accumulator_is_never_allocated_whole_on_the_device():
     """The single [N_sensor x Nt] gpuArray is the bug. Allocation goes through
-    the chunk bounds instead."""
+    the chunk bounds instead -- via prop_sensor_chunks, which adds the byte
+    budget on top of sensor_chunk_bounds' element cap."""
     src = source()
 
     assert "gpuArray(zeros(N_sensor,kgrid.Nt, dataType))" not in src
+    assert "prop_sensor_chunks(" in src
+
+
+def test_the_chunk_size_is_a_byte_budget_not_only_the_element_cap():
+    """The element cap bounds one array; it does not bound the chunk-sized
+    temporary the accumulate rebuilds once per source. Sized by intmax alone
+    that temporary is 4.69 GiB at v11's grid. The propagation path budgets it
+    the way rf_sensor_chunks and rf_element_blocks already do."""
+    src = read("acoustic-module/prop_sensor_chunks.m")
+
+    assert "CHUNK_BYTES" in src
     assert "sensor_chunk_bounds(" in src
+    # The tests-only override has to keep working: it is how the split is
+    # exercised without a GPU.
+    assert "SensorChunkElements" in src
+
+
+def test_the_preflight_reports_device_residency():
+    """Chunking bounds each array, never the resident total -- every chunk is
+    allocated before the source loop. The banner has to say what that total is,
+    or a config that cannot fit still looks fine in the preflight."""
+    src = read("acoustic-module/preflight_array_limits.m")
+
+    assert "prop_sensor_chunks(" in src
+    assert "propagation accumulator" in src
+    assert "AvailableMemory" in src
 
 
 def test_chunk_bounds_live_in_their_own_file():
     """So the partition can be tested in MATLAB without a GPU or a frame."""
     assert (ROOT / "acoustic-module" / "sensor_chunk_bounds.m").is_file()
+    assert (ROOT / "acoustic-module" / "prop_sensor_chunks.m").is_file()
     assert (ROOT / "tests" / "matlab" / "test_sensor_chunk_bounds.m").is_file()
 
 

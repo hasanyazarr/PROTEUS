@@ -44,21 +44,25 @@ useGPU = strcmp(run_param.DATA_CAST,'gpuArray-single') || ...
 % limit. Nothing about the physics changes: sensor rows are independent, and
 % the per-source work that dominates the loop is done over the distance
 % grid, which the split does not touch.
+%
+% prop_sensor_chunks sizes the chunks by a byte budget rather than by the
+% element cap, because the accumulate below builds a chunk-sized temporary
+% once per source. Note what the split does not bound: every chunk is
+% allocated here, before the source loop, so the resident total is
+% N_sensor x Nt whatever the chunk size.
 dataType = class(source.mass_source); % 'single' or 'double'
-if isfield(run_param, 'SensorChunkElements')
-    chunkLimit = run_param.SensorChunkElements;   % tests only
-else
-    chunkLimit = [];
-end
-[chunk_first, chunk_last] = sensor_chunk_bounds( ...
-    N_sensor, kgrid.Nt, useGPU, chunkLimit);
+[chunk_first, chunk_last] = prop_sensor_chunks( ...
+    N_sensor, kgrid.Nt, dataType, useGPU, run_param);
 N_chunk = numel(chunk_first);
 if N_chunk > 1
     run_log('banner', 'sensorchunks', ...
         ['Sensor axis split into %d chunks of <=%d points: ' ...
-         '%d x %d exceeds the %d-element gpuArray limit'], ...
+         '%d x %d, %.2f GiB resident, <=%.2f GiB per chunk'], ...
         N_chunk, max(chunk_last - chunk_first + 1), ...
-        N_sensor, kgrid.Nt, intmax('int32'));
+        N_sensor, kgrid.Nt, ...
+        N_sensor*kgrid.Nt*bytesPerSample(dataType)/2^30, ...
+        max(chunk_last - chunk_first + 1)*kgrid.Nt* ...
+        bytesPerSample(dataType)/2^30);
 end
 
 sensor_p = cell(1, N_chunk);
@@ -224,6 +228,18 @@ else
         sensor_data.p(chunk_first(c):chunk_last(c), :) = gather(sensor_p{c});
         sensor_p{c} = [];
     end
+end
+
+end
+
+
+function b = bytesPerSample(dataType)
+% Bytes one accumulator entry costs, for the size banner above.
+
+if strcmp(dataType,'double')
+    b = 8;
+else
+    b = 4;
 end
 
 end
