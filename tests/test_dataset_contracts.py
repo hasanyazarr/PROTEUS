@@ -579,11 +579,12 @@ def test_main_rf_records_both_sensors_in_one_run_when_there_is_one_batch():
     assert ("combine_requested = num_batches == 1 && ...\n"
             "        run_param.CombineTransmitSensors;") in src
     assert "combine_transmit_sensors = preflight_transmit_record(" in src
-    # The transducer transmit the combined path was going to carry has not
-    # been run when the fallback happens, so the fallback has to run it --
-    # inside the batch loop, where the sizes that refused it became known.
+    # The transducer transmit is never run before the choice is made -- see
+    # test_the_transducer_transmit_waits_for_the_record_preflight. So there is
+    # one call site, inside the batch loop, reached only when the combined run
+    # is not going to carry the transducer itself.
     assert "transducer_transmit_done" in src
-    assert src.count("run_transducer_transmit(") == 3   # def + both call sites
+    assert src.count("run_transducer_transmit(") == 2   # def + the one call
     assert (src.index("combine_transmit_sensors = preflight_transmit_record(")
             < src.index("if ~combine_transmit_sensors && ~transducer_transmit_done"))
     setup = read("acoustic-module/sim_setup.m")
@@ -654,3 +655,35 @@ def test_the_elevation_slab_reaches_the_ground_truth():
     src = read("streamline-module/generate_streamlines.m")
 
     assert "FlowSimulationParameters.Seeding.ElevationSlab" in src
+
+
+def test_the_transducer_transmit_waits_for_the_record_preflight():
+    """A refused record must not cost the transducer transmit first.
+
+    The split path needs the transducer recorded in its own k-Wave run, which
+    is ~42 min per pulse at v11's grid -- 2.1 h for three. That used to run
+    before the batch loop, so a run whose microbubble record could not fit the
+    disk paid all of it before preflight_transmit_record was reached and
+    refused: measured 2026-09-06, 2.1 h spent to learn that 261 GB of record
+    had 139 GB of disk. Nothing in it depended on the transmit; the sizes that
+    refuse the run come from the union mask, which the batch loop builds.
+
+    So there is one call site, inside the batch loop and after the preflight.
+    transducer_transmit_done keeps it to once across batches.
+    """
+    main = read("acoustic-module/main_RF.m")
+
+    # One call, not two. The second occurrence is the local function's own
+    # definition, which sits at the end of the file.
+    assert main.count("= run_transducer_transmit(...") == 2
+    assert "function sensor_data_transducer_1iter = run_transducer_transmit(" in main
+
+    assert (main.index("preflight_transmit_record(")
+            < main.index("= run_transducer_transmit(...")
+            < main.index("Projection = build_bubble_projection("))
+
+    # Run once however many batches there are, and only when the combined run
+    # is not going to carry the transducer itself.
+    assert "transducer_transmit_done = false;" in main
+    assert ("if ~combine_transmit_sensors && ~transducer_transmit_done\n"
+            in main)

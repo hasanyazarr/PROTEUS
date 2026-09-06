@@ -245,15 +245,14 @@ if SimulationParameters.HybridSimulation
         estim_time_mem(Grid, source_transducer{1}, param, beta_coeff_file);
     end
 
+    % The transducer transmit is run inside the batch loop, after the record
+    % preflight, whichever path the settings ask for. It is ~42 min per pulse
+    % at v11's grid and nothing in it feeds the preflight: what decides
+    % whether the run is affordable is the microbubble union mask, which the
+    % batch loop builds. Running it here instead cost 2.1 h on 2026-09-06 to
+    % learn that a 261 GB record had 139 GB of disk.
     sensor_data_transducer_1iter = cell(1,length(sequence));
     transducer_transmit_done = false;
-
-    if ~combine_requested
-        sensor_data_transducer_1iter = run_transducer_transmit(...
-            run_param, kgrid, medium, source_transducer, sensor_transducer, ...
-            n_transducer_time, length(sequence));
-        transducer_transmit_done = true;
-    end
 
     for batch_idx = 1:num_batches
         batch_start = frame_batches(batch_idx, 1);
@@ -291,9 +290,12 @@ if SimulationParameters.HybridSimulation
             numel(mask_idx_MB_batch), numel(mask_idx_trans), n_mb_time, ...
             n_transducer_time, combine_requested, bubble_counts, run_param);
 
-        % A refused combined path leaves the transducer transmit it was going
-        % to carry unrun. Nothing earlier could have known: the sizes that
-        % refuse it are the union mask's, and the union mask is built here.
+        % The split path records the transducer in its own k-Wave run; the
+        % combined path carries it in the run below and needs nothing here.
+        % Which of the two it is was only decided a line ago, so this is the
+        % first point at which the transmit is known to be needed at all --
+        % and the first at which a refusal has already cost nothing.
+        % transducer_transmit_done keeps it to once across batches.
         if ~combine_transmit_sensors && ~transducer_transmit_done
             sensor_data_transducer_1iter = run_transducer_transmit(...
                 run_param, kgrid, medium, source_transducer, ...
